@@ -1,0 +1,198 @@
+# AutoReport 正式默认配置。
+# CLI 默认读取本文件，也可通过 --config 指定其他 YAML。请勿填写并提交真实 API Key。
+
+# Task/run identifier shown in report metadata / 报告元数据中的任务名称
+task_name: "demo_task"
+# Directory containing generated report and state files / 报告与状态文件输出目录
+output_dir: "runs/demo_task/report"
+# Optional report title; empty derives from task_name / 可选报告标题；留空时根据任务名生成
+report_title: "demo_task 方案交付报告"
+# technical|executive|delivery / 目标读者类型
+audience: "technical"
+# zh-CN|en-US / 报告语言
+language: "zh-CN"
+
+# Evidence roots consumed by AutoReport / AutoReport 读取的证据入口
+evidence_paths:
+  - label: "autorealize"
+    # AutoRealize output directory / AutoRealize 输出目录
+    path: "../../runs/demo_task/autorealize"
+    # auto|autorealize|automl|mlevolve|generic / 证据类型
+    kind: "autorealize"
+    # Fail when missing / 缺失时是否直接失败
+    required: true
+  - label: "automl"
+    # MLEvolve/AutoML output directory / MLEvolve 或 AutoML 输出目录
+    path: "../../runs/demo_task/automl"
+    kind: "mlevolve"
+    required: false
+
+# Evidence discovery and deterministic previews / 证据发现与确定性预览
+collection:
+  # Files scanned below each evidence root / 每个证据目录最多扫描文件数
+  max_files_per_path: 700
+  # Maximum characters read from one text file / 单文本文件最大读取字符数
+  max_text_chars_per_file: 40000
+  # Read log tails as comparison evidence / 是否读取日志尾部作为对比证据
+  include_raw_logs: true
+  # Read solution source excerpts / 是否读取方案代码摘要
+  include_code_excerpt: true
+  # Text-like suffixes eligible for collection / 可采集的文本类后缀
+  text_suffixes: [".md", ".txt", ".log", ".json", ".jsonl", ".yaml", ".yml", ".toml", ".py", ".csv"]
+  # Important filenames prioritized even in large trees / 大目录中优先采集的重要文件名
+  important_names:
+    - "data_description.md"
+    - "description.md"
+    - "data_cognition_report.json"
+    - "constraint_memory.json"
+    - "knowledge_base.json"
+    - "autorealize_context.md"
+    - "automl_context.md"
+    - "sample_submission.csv"
+    - "submission.csv"
+    - "assignments.csv"
+    - "unassigned_orders.csv"
+    - "metrics.json"
+    - "run_summary.json"
+    - "run_status.json"
+    - "current_state.json"
+    - "event_stream.jsonl"
+    - "journal.json"
+    - "filtered_journal.json"
+    - "node_summary_compact.json"
+    - "pending_nodes.json"
+    - "best_solution.py"
+    - "solution.py"
+    - "metric.txt"
+    - "node_id.txt"
+    - "model_path.txt"
+    - "model_artifacts_manifest.md"
+    - "llm_usage_brief.json"
+    - "llm_usage_summary.json"
+    - "mlevolve.log"
+  # JSONL lines sampled for structural summary / JSONL 结构摘要采样行数
+  jsonl_max_lines: 200
+  # Object keys retained in JSON summaries / JSON 摘要最大键数量
+  json_key_limit: 80
+  # Array items retained in JSON summaries / JSON 数组摘要最大元素数
+  json_array_item_limit: 20
+  # Recursive JSON summary depth / JSON 摘要递归深度
+  json_compact_max_depth: 3
+  # CSV preview rows / CSV 预览行数
+  csv_preview_rows: 8
+  # Maximum characters per CSV preview cell / CSV 预览单元格字符上限
+  csv_cell_chars: 120
+
+# Candidate and failure comparison / 候选方案与失败模式对比
+comparison:
+  # Best metric evidence characters / 最佳指标证据字符数
+  best_metric_excerpt_chars: 3000
+  # Best solution code characters / 最佳方案代码摘要字符数
+  best_code_excerpt_chars: 12000
+  # Model artifact manifest characters / 模型产物清单字符数
+  model_manifest_excerpt_chars: 4000
+  # Alternative solutions compared / 对比的候选方案数量
+  top_solution_limit: 8
+  # Successful nodes summarized / 摘要中的成功节点数量
+  successful_node_limit: 12
+  # Failed nodes summarized / 摘要中的失败节点数量
+  failed_node_limit: 10
+  # Failure categories retained / 保留的失败类型数量
+  failure_pattern_limit: 12
+  # Delivery artifacts retained / 保留的交付物数量
+  delivery_artifact_limit: 40
+  # Plan text retained per node / 单节点计划字符数
+  node_plan_chars: 1000
+  # Analysis/insight text retained per node / 单节点分析与 insight 字符数
+  node_analysis_chars: 1400
+  # Terminal output tail retained per node / 单节点终端输出尾部字符数
+  node_terminal_tail_chars: 1000
+
+# Prompt budgets and report artifacts / 提示词预算与报告产物
+generation:
+  # Per-section report size guard / 单章节报告字符保护上限
+  max_report_chars_per_section: 60000
+  # Total LLM evidence briefing budget / LLM 证据简报总字符预算
+  max_prompt_chars: 60000
+  # Detailed context items selected for briefing / 简报中详细证据条目数
+  selected_context_item_limit: 32
+  # Paths retained in evidence index / 证据索引路径数量
+  evidence_index_limit: 160
+  # Evidence-root block characters / 证据入口块字符数
+  evidence_root_chars: 5000
+  # Warning block characters / 告警块字符数
+  evidence_warning_chars: 5000
+  # Solution evidence block characters / 方案证据块字符数
+  solution_evidence_chars: 32000
+  # description.md characters / description.md 字符数
+  description_chars: 12000
+  # data_description.md characters / data_description.md 字符数
+  data_description_chars: 9000
+  # Sample-submission preview characters / 样例提交预览字符数
+  sample_submission_chars: 3000
+  # Characters per selected evidence item / 单证据条目字符数
+  context_item_chars: 3000
+  # Combined selected-evidence block characters / 关键证据块字符数
+  context_block_chars: 18000
+  # Evidence-index block characters / 证据索引块字符数
+  evidence_index_chars: 12000
+  # Write structured report JSON / 是否写 report JSON
+  write_report_json: true
+  # Write human-readable Markdown / 是否写 Markdown 报告
+  write_report_markdown: true
+  # JSON output filename / JSON 输出文件名
+  report_json_filename: "report.json"
+  # Markdown output filename / Markdown 输出文件名
+  report_markdown_filename: "report.md"
+
+# Report-writing model and retries / 报告撰写模型与重试
+llm:
+  # AutoReport requires LLM writing / 是否启用 LLM 报告撰写
+  enabled: true
+  # Model identifier / 模型名称
+  model: "deepseek-v4-pro"
+  # OpenAI-compatible endpoint / OpenAI 兼容地址
+  base_url: "https://api.deepseek.com"
+  # Non-empty config wins; null reads DEEPSEEK_API_KEY / 配置非空优先；null 时读取 DEEPSEEK_API_KEY
+  api_key: null
+  # Generation temperature / 生成温度
+  temperature: 0.25
+  # Output token cap; null/0 lets provider decide / 输出 token 上限；null/0 由服务商决定
+  max_tokens: 8192
+  # Request timeout seconds / 请求超时秒数
+  request_timeout_seconds: 180
+  # Network retry attempts / 网络重试次数
+  max_retries: 5
+  # Linear retry base delay / 重试基础等待秒数
+  retry_base_sleep_seconds: 5.0
+  # Maximum retry sleep / 最大重试等待秒数
+  retry_max_sleep_seconds: 30.0
+  # null=provider default / 思考模式：null=服务商默认
+  enable_thinking: null
+  # null|low|medium|high|xhigh|max / 思考强度
+  reasoning_effort: null
+
+# Runtime snapshots, service lifecycle, and output names / 运行快照、服务生命周期与输出名称
+runtime:
+  # Write resolved runtime YAML / 是否写出最终运行配置
+  write_resolved_config: true
+  # Resolved config filename / 最终配置文件名
+  resolved_config_filename: "resolved_config.yaml"
+  # Event stream filename / 事件流文件名
+  event_stream_filename: "event_stream.jsonl"
+  # Current-state filename / 当前状态文件名
+  current_state_filename: "current_state.json"
+  # Recent events retained in current state / 当前状态保留的最近事件数
+  recent_events_limit: 120
+  # Print compact events to stdout / 是否向控制台打印事件
+  print_events_to_console: true
+  # Events returned by one service snapshot / 单次服务快照返回事件数
+  snapshot_event_limit: 500
+  # stdout/stderr characters returned by a snapshot / 快照返回的日志尾部字符数
+  snapshot_text_tail_chars: 60000
+  # stdout/stderr characters persisted by the service / 服务保存的日志尾部字符数
+  service_log_tail_chars: 120000
+  # Maximum last-error summary characters / 最后错误摘要最大字符数
+  service_last_error_chars: 300
+  # Graceful wait before killing a stopped report job / 停止报告任务后强杀前等待秒数
+  service_stop_wait_seconds: 15.0

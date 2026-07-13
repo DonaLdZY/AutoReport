@@ -7,14 +7,25 @@ from typing import Any
 
 
 class ReportEventWriter:
-    def __init__(self, output_dir: Path, *, run_id: str = "") -> None:
+    def __init__(
+        self,
+        output_dir: Path,
+        *,
+        run_id: str = "",
+        event_stream_filename: str = "event_stream.jsonl",
+        current_state_filename: str = "current_state.json",
+        recent_events_limit: int = 120,
+        print_events_to_console: bool = True,
+    ) -> None:
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.event_path = self.output_dir / "event_stream.jsonl"
-        self.state_path = self.output_dir / "current_state.json"
+        self.event_path = self.output_dir / event_stream_filename
+        self.state_path = self.output_dir / current_state_filename
         self.run_id = run_id
         self.seq = 0
         self.recent_events: list[dict[str, Any]] = []
+        self.recent_events_limit = max(1, int(recent_events_limit))
+        self.print_events_to_console = bool(print_events_to_console)
         self.status = "created"
         self.started_at = datetime.now(timezone.utc).isoformat()
         self.write_state()
@@ -41,10 +52,11 @@ class ReportEventWriter:
         with self.event_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
         self.recent_events.append(payload)
-        if len(self.recent_events) > 120:
-            del self.recent_events[: len(self.recent_events) - 120]
+        if len(self.recent_events) > self.recent_events_limit:
+            del self.recent_events[: len(self.recent_events) - self.recent_events_limit]
         self.write_state()
-        print(f"[AutoReport] {component}.{event} {payload['fields']}", flush=True)
+        if self.print_events_to_console:
+            print(f"[AutoReport] {component}.{event} {payload['fields']}", flush=True)
         return payload
 
     def write_state(self) -> None:

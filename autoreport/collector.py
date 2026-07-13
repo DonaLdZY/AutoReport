@@ -43,7 +43,6 @@ IMPORTANT_NAMES = {
     "model_artifacts_manifest.md",
     "llm_usage_brief.json",
     "llm_usage_summary.json",
-    "ml-master.log",
     "mlevolve.log",
 }
 
@@ -102,7 +101,7 @@ def collect_evidence(cfg: AutoReportConfig, events: ReportEventWriter) -> Eviden
         roots=roots,
         items=items,
         warnings=warnings,
-        derived=_derive_summary(items),
+        derived=_derive_summary(items, cfg),
     )
     events.log("autoreport.collector", "COMPLETED", items=len(items), warnings=len(warnings))
     return bundle
@@ -114,17 +113,19 @@ def _collect_from_path(evidence: EvidencePath, root: Path, cfg: AutoReportConfig
         return [item] if item else []
 
     candidates: list[Path] = []
+    important_names = {str(name).lower() for name in cfg.collection.important_names}
+    text_suffixes = {str(suffix).lower() for suffix in cfg.collection.text_suffixes}
     for path in root.rglob("*"):
         if len(candidates) >= cfg.max_files_per_path:
             break
         if not path.is_file():
             continue
         rel_name = path.name.lower()
-        if rel_name in IMPORTANT_NAMES or path.suffix.lower() in TEXT_SUFFIXES:
+        if rel_name in important_names or path.suffix.lower() in text_suffixes:
             candidates.append(path)
 
     def sort_key(path: Path) -> tuple[int, str]:
-        important = 0 if path.name.lower() in IMPORTANT_NAMES else 1
+        important = 0 if path.name.lower() in important_names else 1
         return important, str(path).lower()
 
     out: list[EvidenceItem] = []
@@ -137,7 +138,9 @@ def _collect_from_path(evidence: EvidencePath, root: Path, cfg: AutoReportConfig
 
 def _read_item(evidence: EvidencePath, path: Path, root: Path, cfg: AutoReportConfig) -> EvidenceItem | None:
     suffix = path.suffix.lower()
-    if suffix not in TEXT_SUFFIXES and path.name.lower() not in IMPORTANT_NAMES:
+    text_suffixes = {str(item).lower() for item in cfg.collection.text_suffixes}
+    important_names = {str(item).lower() for item in cfg.collection.important_names}
+    if suffix not in text_suffixes and path.name.lower() not in important_names:
         return None
     try:
         rel = str(path.relative_to(root)).replace("\\", "/")
@@ -148,10 +151,14 @@ def _read_item(evidence: EvidencePath, path: Path, root: Path, cfg: AutoReportCo
     table_preview: list[dict[str, str]] = []
     if suffix in {".json", ".jsonl"}:
         text = _read_text(path, cfg.max_text_chars_per_file)
-        json_summary = _summarize_json_text(text, suffix=suffix)
+        json_summary = _summarize_json_text(text, suffix=suffix, cfg=cfg)
     elif suffix == ".csv":
         text = _read_text(path, min(cfg.max_text_chars_per_file, 12000))
-        table_preview = _read_csv_preview(path)
+        table_preview = _read_csv_preview(
+            path,
+            limit=cfg.collection.csv_preview_rows,
+            cell_chars=cfg.collection.csv_cell_chars,
+        )
     elif suffix in {".log"}:
         if not cfg.include_raw_logs:
             return None
@@ -187,16 +194,22 @@ def _read_text_tail(path: Path, max_chars: int) -> str:
     return raw[-max_chars:]
 
 
-def _summarize_json_text(text: str, *, suffix: str) -> dict[str, Any]:
+def _summarize_json_text(text: str, *, suffix: str, cfg: AutoReportConfig) -> dict[str, Any]:
     if not text.strip():
         return {}
     try:
         if suffix == ".jsonl":
-            rows = [json.loads(line) for line in text.splitlines()[:200] if line.strip()]
+            rows = [
+                json.loads(line)
+                for line in text.splitlines()[: max(1, cfg.collection.jsonl_max_lines)]
+                if line.strip()
+            ]
             return {
                 "type": "jsonl",
                 "rows_sampled": len(rows),
-                "first_keys": sorted(list(rows[0].keys()))[:30] if rows and isinstance(rows[0], dict) else [],
+                "first_keys": sorted(list(rows[0].keys()))[: cfg.collection.json_key_limit]
+                if rows and isinstance(rows[0], dict)
+                else [],
             }
         obj = json.loads(text)
     except Exception as exc:  # noqa: BLE001
@@ -204,16 +217,26 @@ def _summarize_json_text(text: str, *, suffix: str) -> dict[str, Any]:
     if isinstance(obj, dict):
         return {
             "type": "object",
-            "keys": sorted([str(k) for k in obj.keys()])[:80],
+            "keys": sorted([str(k) for k in obj.keys()])[: cfg.collection.json_key_limit],
             "summary": _summarize_known_json(obj),
-            "object_excerpt": _compact_json_value(obj, max_depth=3, max_items=80),
+            "object_excerpt": _compact_json_value(
+                obj,
+                max_depth=cfg.collection.json_compact_max_depth,
+                max_items=cfg.collection.json_key_limit,
+            ),
         }
     if isinstance(obj, list):
         return {
             "type": "array",
             "length": len(obj),
-            "first_item_keys": sorted(list(obj[0].keys()))[:40] if obj and isinstance(obj[0], dict) else [],
-            "items_excerpt": _compact_json_value(obj[:20], max_depth=3, max_items=80),
+            "first_item_keys": sorted(list(obj[0].keys()))[: cfg.collection.json_key_limit]
+            if obj and isinstance(obj[0], dict)
+            else [],
+            "items_excerpt": _compact_json_value(
+                obj[: cfg.collection.json_array_item_limit],
+                max_depth=cfg.collection.json_compact_max_depth,
+                max_items=cfg.collection.json_key_limit,
+            ),
         }
     return {"type": type(obj).__name__, "value": str(obj)[:200]}
 
@@ -260,7 +283,7 @@ def _summarize_known_json(obj: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _read_csv_preview(path: Path, limit: int = 8) -> list[dict[str, str]]:
+def _read_csv_preview(path: Path, limit: int = 8, cell_chars: int = 120) -> list[dict[str, str]]:
     try:
         with path.open("r", encoding="utf-8-sig", errors="ignore", newline="") as f:
             reader = csv.DictReader(f)
@@ -268,7 +291,7 @@ def _read_csv_preview(path: Path, limit: int = 8) -> list[dict[str, str]]:
             for idx, row in enumerate(reader):
                 if idx >= limit:
                     break
-                rows.append({str(k): str(v)[:120] for k, v in row.items()})
+                rows.append({str(k): str(v)[: max(1, cell_chars)] for k, v in row.items()})
             return rows
     except Exception:
         return []
@@ -289,7 +312,7 @@ def _classify_item(path: Path, parent_kind: str) -> str:
     return "generic"
 
 
-def _derive_summary(items: list[EvidenceItem]) -> dict[str, Any]:
+def _derive_summary(items: list[EvidenceItem], cfg: AutoReportConfig) -> dict[str, Any]:
     by_kind: dict[str, int] = {}
     for item in items:
         by_kind[item.kind] = by_kind.get(item.kind, 0) + 1
@@ -312,11 +335,11 @@ def _derive_summary(items: list[EvidenceItem]) -> dict[str, Any]:
             for item in items
             if Path(item.path).name.lower() == "sample_submission.csv" and item.table_preview
         ][:1],
-        "solution_evidence": _derive_solution_evidence(items),
+        "solution_evidence": _derive_solution_evidence(items, cfg),
     }
 
 
-def _derive_solution_evidence(items: list[EvidenceItem]) -> dict[str, Any]:
+def _derive_solution_evidence(items: list[EvidenceItem], cfg: AutoReportConfig) -> dict[str, Any]:
     """Build a delivery-oriented evidence pack for the report writer.
 
     AutoReport should persuade users that the selected solution is usable. This
@@ -328,11 +351,11 @@ def _derive_solution_evidence(items: list[EvidenceItem]) -> dict[str, Any]:
     for item in items:
         by_name.setdefault(Path(item.path).name.lower(), []).append(item)
 
-    best_solution = _best_solution_summary(items)
-    node_rows = _candidate_nodes_from_items(items)
-    candidate_summary = _summarize_candidate_nodes(node_rows)
-    top_solutions = _top_solution_summaries(items)
-    artifacts = _delivery_artifact_summary(items)
+    best_solution = _best_solution_summary(items, cfg)
+    node_rows = _candidate_nodes_from_items(items, cfg)
+    candidate_summary = _summarize_candidate_nodes(node_rows, cfg)
+    top_solutions = _top_solution_summaries(items, cfg)
+    artifacts = _delivery_artifact_summary(items, cfg)
     reusable = _reusable_code_summary(best_solution.get("code_excerpt", ""))
 
     return {
@@ -354,7 +377,7 @@ def _derive_solution_evidence(items: list[EvidenceItem]) -> dict[str, Any]:
     }
 
 
-def _best_solution_summary(items: list[EvidenceItem]) -> dict[str, Any]:
+def _best_solution_summary(items: list[EvidenceItem], cfg: AutoReportConfig) -> dict[str, Any]:
     metric_items = [
         item
         for item in items
@@ -383,25 +406,31 @@ def _best_solution_summary(items: list[EvidenceItem]) -> dict[str, Any]:
     code_excerpt = solution_items[0].text_excerpt if solution_items else ""
     return {
         "metric": metric,
-        "metric_text": metric_items[0].text_excerpt[:3000] if metric_items else "",
+        "metric_text": metric_items[0].text_excerpt[: cfg.comparison.best_metric_excerpt_chars]
+        if metric_items
+        else "",
         "metric_path": metric_items[0].path if metric_items else "",
         "node_id": node_id_items[0].text_excerpt.strip()[:120] if node_id_items else "",
         "solution_path": solution_items[0].path if solution_items else "",
-        "code_excerpt": code_excerpt[:12000],
+        "code_excerpt": code_excerpt[: cfg.comparison.best_code_excerpt_chars],
         "code_functions": _extract_python_defs(code_excerpt),
-        "model_artifacts_manifest": model_manifest[0].text_excerpt[:4000] if model_manifest else "",
+        "model_artifacts_manifest": model_manifest[0].text_excerpt[
+            : cfg.comparison.model_manifest_excerpt_chars
+        ]
+        if model_manifest
+        else "",
         "model_artifacts_manifest_path": model_manifest[0].path if model_manifest else "",
     }
 
 
-def _top_solution_summaries(items: list[EvidenceItem]) -> list[dict[str, Any]]:
+def _top_solution_summaries(items: list[EvidenceItem], cfg: AutoReportConfig) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     metric_items = [
         item
         for item in items
         if Path(item.path).name.lower() == "metric.txt" and _path_has_part(item.path, "top_solution")
     ]
-    for item in sorted(metric_items, key=lambda x: x.path.lower())[:8]:
+    for item in sorted(metric_items, key=lambda x: x.path.lower())[: cfg.comparison.top_solution_limit]:
         parent = str(Path(item.path).parent)
         sibling = _find_item_by_path(items, str(Path(parent) / "node_id.txt"))
         solution = _find_item_by_path(items, str(Path(parent) / "solution.py"))
@@ -418,7 +447,7 @@ def _top_solution_summaries(items: list[EvidenceItem]) -> list[dict[str, Any]]:
     return out
 
 
-def _delivery_artifact_summary(items: list[EvidenceItem]) -> list[dict[str, Any]]:
+def _delivery_artifact_summary(items: list[EvidenceItem], cfg: AutoReportConfig) -> list[dict[str, Any]]:
     interesting_names = {
         "submission.csv",
         "submissions.csv",
@@ -447,26 +476,26 @@ def _delivery_artifact_summary(items: list[EvidenceItem]) -> list[dict[str, Any]
         elif item.text_excerpt:
             entry["text_excerpt"] = item.text_excerpt[:1200]
         out.append(entry)
-    return out[:40]
+    return out[: cfg.comparison.delivery_artifact_limit]
 
 
-def _candidate_nodes_from_items(items: list[EvidenceItem]) -> list[dict[str, Any]]:
+def _candidate_nodes_from_items(items: list[EvidenceItem], cfg: AutoReportConfig) -> list[dict[str, Any]]:
     compact_items = [item for item in items if Path(item.path).name.lower() == "node_summary_compact.json"]
     for item in compact_items:
         rows = _load_json_from_item(item)
         if isinstance(rows, list):
-            return [_normalize_compact_node(row) for row in rows if isinstance(row, dict)]
+            return [_normalize_compact_node(row, cfg) for row in rows if isinstance(row, dict)]
 
     journal_items = [item for item in items if Path(item.path).name.lower() in {"journal.json", "filtered_journal.json"}]
     for item in journal_items:
         obj = _load_json_from_item(item)
         nodes = obj.get("nodes") if isinstance(obj, dict) else None
         if isinstance(nodes, list):
-            return [_normalize_journal_node(row) for row in nodes if isinstance(row, dict)]
+            return [_normalize_journal_node(row, cfg) for row in nodes if isinstance(row, dict)]
     return []
 
 
-def _summarize_candidate_nodes(nodes: list[dict[str, Any]]) -> dict[str, Any]:
+def _summarize_candidate_nodes(nodes: list[dict[str, Any]], cfg: AutoReportConfig) -> dict[str, Any]:
     if not nodes:
         return {
             "node_count": 0,
@@ -485,7 +514,7 @@ def _summarize_candidate_nodes(nodes: list[dict[str, Any]]) -> dict[str, Any]:
         reverse=_boolish(maximize),
     )
     failed = [n for n in nodes if n.get("buggy") or n.get("exc_type")]
-    failure_patterns = _failure_patterns(failed)
+    failure_patterns = _failure_patterns(failed, cfg)
     method_signals = {
         "nodes_with_greedy": sum(1 for n in nodes if n.get("has_greedy")),
         "nodes_with_rl_env": sum(1 for n in nodes if n.get("has_rl_env")),
@@ -496,14 +525,20 @@ def _summarize_candidate_nodes(nodes: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "node_count": len(nodes),
         "maximize": maximize,
-        "successful_metric_nodes": [_compact_node_for_report(n) for n in successful[:12]],
-        "failed_nodes": [_compact_node_for_report(n) for n in failed[:10]],
+        "successful_metric_nodes": [
+            _compact_node_for_report(n, cfg)
+            for n in successful[: cfg.comparison.successful_node_limit]
+        ],
+        "failed_nodes": [
+            _compact_node_for_report(n, cfg)
+            for n in failed[: cfg.comparison.failed_node_limit]
+        ],
         "failure_patterns": failure_patterns,
         "method_signals": method_signals,
     }
 
 
-def _normalize_compact_node(row: dict[str, Any]) -> dict[str, Any]:
+def _normalize_compact_node(row: dict[str, Any], cfg: AutoReportConfig) -> dict[str, Any]:
     metric = row.get("metric")
     if isinstance(metric, dict):
         metric_value = metric.get("value")
@@ -523,19 +558,21 @@ def _normalize_compact_node(row: dict[str, Any]) -> dict[str, Any]:
         "maximize": maximize,
         "exc_type": str(row.get("exc_type") or ""),
         "exc_msg": str(row.get("exc_msg") or "")[:500],
-        "plan": str(row.get("plan") or "")[:1000],
-        "analysis": str(row.get("analysis") or "")[:1400],
-        "llm_insight": str(row.get("llm_insight") or row.get("insight") or "")[:1400],
+        "plan": str(row.get("plan") or "")[: cfg.comparison.node_plan_chars],
+        "analysis": str(row.get("analysis") or "")[: cfg.comparison.node_analysis_chars],
+        "llm_insight": str(row.get("llm_insight") or row.get("insight") or "")[
+            : cfg.comparison.node_analysis_chars
+        ],
         "funcs": str(row.get("funcs") or "")[:800],
         "classes": str(row.get("classes") or "")[:800],
         "has_greedy": bool(row.get("has_greedy")),
         "has_rl_env": bool(row.get("has_rl_env")),
         "has_decision_summary": bool(row.get("has_decision_summary")),
-        "term_tail": str(row.get("term_tail") or "")[:1000],
+        "term_tail": str(row.get("term_tail") or "")[: cfg.comparison.node_terminal_tail_chars],
     }
 
 
-def _normalize_journal_node(row: dict[str, Any]) -> dict[str, Any]:
+def _normalize_journal_node(row: dict[str, Any], cfg: AutoReportConfig) -> dict[str, Any]:
     metric = row.get("metric") if isinstance(row.get("metric"), dict) else {}
     code = str(row.get("code") or "")
     return {
@@ -550,19 +587,21 @@ def _normalize_journal_node(row: dict[str, Any]) -> dict[str, Any]:
         "maximize": metric.get("maximize"),
         "exc_type": str(row.get("exc_type") or ""),
         "exc_msg": _exc_message(row.get("exc_info"))[:500],
-        "plan": str(row.get("plan") or "")[:1000],
-        "analysis": str(row.get("parser_analysis") or row.get("analysis") or "")[:1400],
-        "llm_insight": str(row.get("llm_insight") or "")[:1400],
+        "plan": str(row.get("plan") or "")[: cfg.comparison.node_plan_chars],
+        "analysis": str(row.get("parser_analysis") or row.get("analysis") or "")[
+            : cfg.comparison.node_analysis_chars
+        ],
+        "llm_insight": str(row.get("llm_insight") or "")[: cfg.comparison.node_analysis_chars],
         "funcs": ", ".join(_extract_python_defs(code))[:800],
         "classes": ", ".join(_extract_python_classes(code))[:800],
         "has_greedy": "greedy" in code.lower(),
         "has_rl_env": any(tok in code for tok in ["Env", "PPO", "DQN", "ActorCritic", "policy"]),
         "has_decision_summary": "Decision Validation Summary" in code or "decision validation" in code.lower(),
-        "term_tail": str(row.get("_term_out") or "")[-1000:],
+        "term_tail": str(row.get("_term_out") or "")[-cfg.comparison.node_terminal_tail_chars :],
     }
 
 
-def _compact_node_for_report(node: dict[str, Any]) -> dict[str, Any]:
+def _compact_node_for_report(node: dict[str, Any], cfg: AutoReportConfig) -> dict[str, Any]:
     return {
         "id": node.get("id"),
         "stage": node.get("stage"),
@@ -581,12 +620,14 @@ def _compact_node_for_report(node: dict[str, Any]) -> dict[str, Any]:
             "exc_type": node.get("exc_type"),
             "exc_msg": node.get("exc_msg"),
         },
-        "plan": str(node.get("plan") or "")[:700],
-        "insight": str(node.get("llm_insight") or node.get("analysis") or "")[:900],
+        "plan": str(node.get("plan") or "")[: cfg.comparison.node_plan_chars],
+        "insight": str(node.get("llm_insight") or node.get("analysis") or "")[
+            : cfg.comparison.node_analysis_chars
+        ],
     }
 
 
-def _failure_patterns(failed_nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _failure_patterns(failed_nodes: list[dict[str, Any]], cfg: AutoReportConfig) -> list[dict[str, Any]]:
     buckets: dict[str, dict[str, Any]] = {}
     for node in failed_nodes:
         key = str(node.get("exc_type") or "").strip() or _failure_family(str(node.get("analysis") or node.get("term_tail") or "unknown"))
@@ -601,7 +642,9 @@ def _failure_patterns(failed_nodes: list[dict[str, Any]]) -> list[dict[str, Any]
                     "message": str(node.get("exc_msg") or node.get("analysis") or node.get("term_tail") or "")[:500],
                 }
             )
-    return sorted(buckets.values(), key=lambda row: (-int(row["count"]), str(row["type"])))[:12]
+    return sorted(buckets.values(), key=lambda row: (-int(row["count"]), str(row["type"])))[
+        : cfg.comparison.failure_pattern_limit
+    ]
 
 
 def _failure_family(text: str) -> str:

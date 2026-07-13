@@ -13,7 +13,14 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from autoreport.config import config_schema, load_config
+from autoreport.config import (
+    RuntimeConfig,
+    config_from_dict,
+    config_schema,
+    dump_config,
+    load_config,
+    write_config_yaml,
+)
 
 
 DEFAULT_WORKDIR = Path(__file__).resolve().parent
@@ -103,17 +110,27 @@ class JobStore:
 
 store = JobStore()
 app = FastAPI(title="AutoReport API", version="0.1.0")
+_allowed_origins = [
+    item.strip()
+    for item in os.environ.get(
+        "AUTOREPORT_ALLOWED_ORIGINS",
+        "http://127.0.0.1:5173,http://localhost:5173",
+    ).split(",")
+    if item.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_allowed_origins,
+    allow_credentials="*" not in _allowed_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
 def _tail(text: str, limit: int = 120000) -> str:
-    return text[-limit:] if text else ""
+    if not text or limit <= 0:
+        return ""
+    return text[-limit:]
 
 
 def _safe_read_json(path: Path, default: Any) -> Any:
@@ -123,6 +140,15 @@ def _safe_read_json(path: Path, default: Any) -> Any:
         return json.loads(path.read_text(encoding="utf-8-sig", errors="ignore"))
     except Exception:
         return default
+
+
+def _safe_load_config(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        return dump_config(load_config(path))
+    except Exception:
+        return {}
 
 
 def _parse_jsonl(path: Path, limit: int = 400) -> list[dict[str, Any]]:
@@ -139,15 +165,29 @@ def _parse_jsonl(path: Path, limit: int = 400) -> list[dict[str, Any]]:
 
 def _build_snapshot(output_dir_raw: str) -> dict[str, Any]:
     out_dir = Path(output_dir_raw).expanduser().resolve()
+    resolved_path = out_dir / "resolved_config.yaml"
+    if not resolved_path.exists():
+        resolved_path = next(iter(sorted(out_dir.glob("*config*.yaml"))), resolved_path)
+    resolved = _safe_load_config(resolved_path)
+    runtime = dict(resolved.get("runtime") or {})
+    generation = dict(resolved.get("generation") or {})
+    state_name = str(runtime.get("current_state_filename") or "current_state.json")
+    event_name = str(runtime.get("event_stream_filename") or "event_stream.jsonl")
+    report_json_name = str(generation.get("report_json_filename") or "report.json")
+    report_md_name = str(generation.get("report_markdown_filename") or "report.md")
+    event_limit = max(1, int(runtime.get("snapshot_event_limit") or 500))
+    text_tail_chars = max(0, int(runtime.get("snapshot_text_tail_chars") or 60000))
     return {
         "output_dir": str(out_dir),
-        "current_state": _safe_read_json(out_dir / "current_state.json", {}),
-        "events": _parse_jsonl(out_dir / "event_stream.jsonl", limit=500),
-        "report": _safe_read_json(out_dir / "report.json", {}),
-        "report_markdown": (out_dir / "report.md").read_text(encoding="utf-8", errors="ignore") if (out_dir / "report.md").exists() else "",
-        "resolved_config": _safe_read_json(out_dir / "resolved_config.json", {}),
-        "stdout": (out_dir / "_service_stdout.log").read_text(encoding="utf-8", errors="ignore")[-60000:] if (out_dir / "_service_stdout.log").exists() else "",
-        "stderr": (out_dir / "_service_stderr.log").read_text(encoding="utf-8", errors="ignore")[-60000:] if (out_dir / "_service_stderr.log").exists() else "",
+        "current_state": _safe_read_json(out_dir / state_name, {}),
+        "events": _parse_jsonl(out_dir / event_name, limit=event_limit),
+        "report": _safe_read_json(out_dir / report_json_name, {}),
+        "report_markdown": (out_dir / report_md_name).read_text(encoding="utf-8", errors="ignore")
+        if (out_dir / report_md_name).exists()
+        else "",
+        "resolved_config": resolved,
+        "stdout": _tail((out_dir / "_service_stdout.log").read_text(encoding="utf-8", errors="ignore"), text_tail_chars) if (out_dir / "_service_stdout.log").exists() else "",
+        "stderr": _tail((out_dir / "_service_stderr.log").read_text(encoding="utf-8", errors="ignore"), text_tail_chars) if (out_dir / "_service_stderr.log").exists() else "",
     }
 
 
@@ -160,9 +200,15 @@ def _write_generated_config(req: StartReportRequest) -> Path:
     raw["task_name"] = req.task_name
     raw["output_dir"] = str(out_dir)
     raw["evidence_paths"] = [item.model_dump() for item in req.evidence_paths]
-    raw["use_llm"] = bool(raw.get("use_llm", True))
-    path = out_dir / "_service_config.json"
-    path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+    llm = dict(raw.get("llm") or {})
+    llm["enabled"] = bool(llm.get("enabled", raw.get("use_llm", True)))
+    # The request key is forwarded through the child process environment. Do
+    # not materialize it in _service_config.yaml or resolved_config.yaml.
+    llm["api_key"] = None
+    llm.pop("apiKey", None)
+    raw["llm"] = llm
+    path = out_dir / "_service_config.yaml"
+    write_config_yaml(config_from_dict(raw), path, include_secrets=False)
     return path
 
 
@@ -172,13 +218,14 @@ def _validate_llm_start_config(req: StartReportRequest) -> None:
             cfg = load_config(req.config_path)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=f"invalid AutoReport config_path: {exc}") from exc
-        raw = {"use_llm": cfg.use_llm, "llm": cfg.llm}
+        raw = dump_config(cfg, include_secrets=True)
     else:
         raw = dict(req.config or {})
 
-    if not bool(raw.get("use_llm", True)):
-        raise HTTPException(status_code=400, detail="AutoReport requires LLM; config.use_llm must be true")
     llm = dict(raw.get("llm") or {})
+    enabled = bool(llm.get("enabled", raw.get("use_llm", True)))
+    if not enabled:
+        raise HTTPException(status_code=400, detail="AutoReport requires llm.enabled=true")
     model = str(llm.get("model") or llm.get("model_name") or "").strip()
     base_url = str(llm.get("base_url") or llm.get("baseUrl") or "").strip()
     api_key = str(
@@ -202,10 +249,20 @@ def _validate_llm_start_config(req: StartReportRequest) -> None:
 def _run_job(job_id: str, req: StartReportRequest) -> None:
     out_dir = Path(req.output_dir).expanduser().resolve()
     cfg_path = _write_generated_config(req)
+    try:
+        runtime_cfg = load_config(cfg_path).runtime
+    except Exception:
+        runtime_cfg = RuntimeConfig()
+    log_tail_chars = max(0, int(runtime_cfg.service_log_tail_chars))
+    last_error_chars = max(1, int(runtime_cfg.service_last_error_chars))
     workdir = Path(req.working_dir).expanduser().resolve() if req.working_dir.strip() else DEFAULT_WORKDIR
     cmd = [req.python_executable or "python", "-m", "autoreport.cli", "--config", str(cfg_path)]
     env = os.environ.copy()
     env.update(req.env_overrides or {})
+    raw_llm = dict((req.config or {}).get("llm") or {})
+    request_api_key = str(raw_llm.get("api_key") or raw_llm.get("apiKey") or "").strip()
+    if request_api_key:
+        env.setdefault("DEEPSEEK_API_KEY", request_api_key)
     try:
         popen_kwargs: dict[str, Any] = {}
         if os.name == "nt":
@@ -231,12 +288,27 @@ def _run_job(job_id: str, req: StartReportRequest) -> None:
     exit_code = proc.returncode
     out_dir.mkdir(parents=True, exist_ok=True)
     if out:
-        (out_dir / "_service_stdout.log").write_text(_tail(out), encoding="utf-8", errors="ignore")
+        (out_dir / "_service_stdout.log").write_text(
+            _tail(out, log_tail_chars),
+            encoding="utf-8",
+            errors="ignore",
+        )
     if err:
-        (out_dir / "_service_stderr.log").write_text(_tail(err), encoding="utf-8", errors="ignore")
+        (out_dir / "_service_stderr.log").write_text(
+            _tail(err, log_tail_chars),
+            encoding="utf-8",
+            errors="ignore",
+        )
     status = "completed" if exit_code == 0 else "failed"
-    last_error = None if exit_code == 0 else ((err or out or f"AutoReport exited with code {exit_code}").strip().splitlines()[-1][:300])
-    store.update(job_id, status=status, exit_code=exit_code, last_error=last_error, stdout_tail=_tail(out or ""), stderr_tail=_tail(err or ""))
+    last_error = None if exit_code == 0 else ((err or out or f"AutoReport exited with code {exit_code}").strip().splitlines()[-1][:last_error_chars])
+    store.update(
+        job_id,
+        status=status,
+        exit_code=exit_code,
+        last_error=last_error,
+        stdout_tail=_tail(out or "", log_tail_chars),
+        stderr_tail=_tail(err or "", log_tail_chars),
+    )
 
 
 @app.get("/health")
@@ -247,7 +319,7 @@ def health() -> dict[str, str]:
 @app.get("/usage")
 def usage() -> dict[str, Any]:
     return {
-        "cli": "python -m autoreport.cli --config config.example.json",
+        "cli": "python -m autoreport.cli --config config/config.yaml",
         "evidence_arg": "python -m autoreport.cli --task-name demo --output-dir runs/demo/report --evidence autorealize=/path/ar::autorealize --evidence automl=/path/ml::automl",
         "config_schema": config_schema(),
     }
@@ -282,10 +354,16 @@ def stop_job(req: StopRequest) -> dict[str, Any]:
     proc = job.process
     if proc is None or proc.poll() is not None:
         return {"status": "not_running", "job_id": req.job_id}
+    out_dir = Path(job.output_dir)
+    resolved_path = out_dir / "resolved_config.yaml"
+    if not resolved_path.exists():
+        resolved_path = next(iter(sorted(out_dir.glob("*config*.yaml"))), resolved_path)
+    runtime = dict(_safe_load_config(resolved_path).get("runtime") or {})
+    stop_wait = max(0.0, float(runtime.get("service_stop_wait_seconds") or 15.0))
     try:
         proc.terminate()
         try:
-            proc.wait(timeout=15)
+            proc.wait(timeout=stop_wait)
         except subprocess.TimeoutExpired:
             proc.kill()
     except Exception:
