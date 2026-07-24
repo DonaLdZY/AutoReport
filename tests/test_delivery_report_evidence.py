@@ -68,6 +68,10 @@ def main():
                     "metric": 99.0,
                     "buggy": False,
                     "valid": False,
+                    "search_eligible": True,
+                    "delivery_ready": False,
+                    "delivery_certified": False,
+                    "method_mode": "non_rl_solver",
                     "plan": "simple greedy",
                     "analysis": "Too many unassigned units.",
                     "has_greedy": True,
@@ -81,6 +85,11 @@ def main():
                     "metric": 12.5,
                     "buggy": False,
                     "valid": True,
+                    "search_eligible": True,
+                    "delivery_ready": True,
+                    "delivery_certified": False,
+                    "certification_source": "candidate_reported_score",
+                    "method_mode": "non_rl_solver",
                     "plan": "improved solver",
                     "analysis": "All constraints satisfied.",
                     "has_greedy": True,
@@ -116,8 +125,54 @@ def main():
     assert evidence["reusable_code_interface"]["has_predict"] is True
     assert evidence["candidate_comparison"]["node_count"] == 4
     assert evidence["candidate_comparison"]["successful_metric_nodes"][0]["id"] == "node_best"
+    assert evidence["candidate_comparison"]["search_candidate_nodes"][0]["id"] == "node_best"
+    assert {n["id"] for n in evidence["candidate_comparison"]["search_candidate_nodes"]} == {
+        "node_best",
+    }
     assert evidence["candidate_comparison"]["failure_patterns"][0]["type"] == "KeyError"
     assert any(item["name"] == "metrics.json" for item in evidence["delivery_artifacts"])
+
+
+def test_interrupted_checkpoint_candidates_are_available_as_report_evidence(tmp_path: Path) -> None:
+    automl = tmp_path / "automl"
+    log_dir = automl / "logs" / "run_001"
+    candidate = automl / "workspaces" / "run_001" / "checkpoint_candidates" / "top1"
+    log_dir.mkdir(parents=True)
+    candidate.mkdir(parents=True)
+    (log_dir / "checkpoint_manifest.json").write_text(
+        json.dumps(
+            {
+                "status": "interrupted_resumable",
+                "resumable": True,
+                "top_solutions": [],
+                "provisional_top": [{"node_id": "partial-1", "metric": 42.0}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (candidate / "metric.txt").write_text(
+        "Metric: 42\nMaximize: False\nDelivery Ready: False\n",
+        encoding="utf-8",
+    )
+    (candidate / "node_id.txt").write_text("partial-1", encoding="utf-8")
+    (candidate / "solution.py").write_text(
+        "def predict(model_path=None, data=None):\n    return data\n",
+        encoding="utf-8",
+    )
+
+    cfg = AutoReportConfig(
+        task_name="interrupted",
+        output_dir=str(tmp_path / "report"),
+        evidence_paths=[EvidencePath(label="automl", path=str(automl), kind="automl")],
+    )
+    bundle = collect_evidence(cfg, ReportEventWriter(tmp_path / "events", run_id="test"))
+    evidence_files = bundle.derived["solution_evidence"]["available_evidence_files"]
+    solution_evidence = bundle.derived["solution_evidence"]
+
+    assert evidence_files["checkpoint_manifests"] == [str(log_dir / "checkpoint_manifest.json")]
+    assert any("checkpoint_candidates" in path for path in evidence_files["solution_files"])
+    assert solution_evidence["checkpoint_candidates"][0]["node_id"] == "partial-1"
+    assert solution_evidence["best_solution"]["node_id"] == ""
 
 
 def test_briefing_prioritizes_solution_delivery_evidence(tmp_path: Path) -> None:

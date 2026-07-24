@@ -29,7 +29,7 @@ evidence_paths:
 
 # Evidence discovery and deterministic previews / 证据发现与确定性预览
 collection:
-  # Files scanned below each evidence root / 每个证据目录最多扫描文件数
+  # File contents read after complete discovery and prioritization / 完整发现并排序后读取内容的文件数
   max_files_per_path: 700
   # Maximum characters read from one text file / 单文本文件最大读取字符数
   max_text_chars_per_file: 40000
@@ -69,6 +69,8 @@ collection:
     - "model_artifacts_manifest.md"
     - "llm_usage_brief.json"
     - "llm_usage_summary.json"
+    - "dependency_installations.jsonl"
+    - "dependency_installations_summary.json"
     - "mlevolve.log"
   # JSONL lines sampled for structural summary / JSONL 结构摘要采样行数
   jsonl_max_lines: 200
@@ -108,6 +110,23 @@ comparison:
   # Terminal output tail retained per node / 单节点终端输出尾部字符数
   node_terminal_tail_chars: 1000
 
+# LLM method reading, comparison, and final report review / LLM 方法阅读、对比与终稿检查
+analysis:
+  # concise|standard|detailed / 报告详细程度
+  detail_level: "detailed"
+  # Accepted MLEvolve candidates compared in the report / 报告对比的 MLEvolve 有效候选数量
+  comparison_candidate_limit: 6
+  # Additional source-reading turns after the initial head/tail context / 初始头尾上下文后的代码补读轮次
+  max_retrieval_rounds: 2
+  # Source ranges accepted in one retrieval turn / 单轮最多补读片段数
+  max_retrieval_requests_per_round: 4
+  # Maximum lines returned for one source range / 单片段最大补读行数
+  retrieval_chunk_lines: 320
+  # Initial head/tail characters available per selected source / 单个关键文件初始头尾字符预算
+  initial_source_chars: 18000
+  # Run a final report-faithfulness and completeness pass / 是否执行终稿准确性与完整性检查
+  enable_report_audit: true
+
 # Prompt budgets and report artifacts / 提示词预算与报告产物
 generation:
   # Per-section report size guard / 单章节报告字符保护上限
@@ -144,6 +163,8 @@ generation:
   report_json_filename: "report.json"
   # Markdown output filename / Markdown 输出文件名
   report_markdown_filename: "report.md"
+  # Internal analysis trace; not rendered in the user report / 内部分析轨迹，不在用户报告中展示
+  report_trace_filename: "report_trace.json"
 
 # Report-writing model and retries / 报告撰写模型与重试
 llm:
@@ -157,8 +178,10 @@ llm:
   api_key: null
   # Generation temperature / 生成温度
   temperature: 0.25
-  # Output token cap; null/0 lets provider decide / 输出 token 上限；null/0 由服务商决定
-  max_tokens: 8192
+  # Minimum cap for every normal business LLM request / 所有正常业务 LLM 请求的输出 token 下限
+  minimum_output_tokens: 32768
+  # Report output token cap / 报告输出 token 上限
+  max_tokens: 32768
   # Request timeout seconds / 请求超时秒数
   request_timeout_seconds: 180
   # Network retry attempts / 网络重试次数
@@ -171,6 +194,10 @@ llm:
   enable_thinking: null
   # null|low|medium|high|xhigh|max / 思考强度
   reasoning_effort: null
+  # Provider context window used for headroom management / 用于上下文余量管理的模型窗口
+  context_window_tokens: 131072
+  # Reserved input/output headroom before dynamic context is compacted / 动态上下文压缩前保留的余量
+  context_headroom_ratio: 0.18
 
 # Runtime snapshots, service lifecycle, and output names / 运行快照、服务生命周期与输出名称
 runtime:

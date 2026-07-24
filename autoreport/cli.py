@@ -98,24 +98,32 @@ def run(cfg: AutoReportConfig) -> dict:
         task_name=cfg.task_name,
         output_dir=str(output_dir),
     )
-    if cfg.runtime.write_resolved_config:
-        write_config_yaml(
-            cfg,
-            output_dir / cfg.runtime.resolved_config_filename,
+    try:
+        if cfg.runtime.write_resolved_config:
+            write_config_yaml(
+                cfg,
+                output_dir / cfg.runtime.resolved_config_filename,
+            )
+        bundle = collect_evidence(cfg, events)
+        payload = generate_report(cfg, bundle, events)
+        events.log(
+            "autoreport.pipeline",
+            "COMPLETED",
+            report_json=str(output_dir / cfg.generation.report_json_filename)
+            if cfg.generation.write_report_json
+            else "",
+            report_md=str(output_dir / cfg.generation.report_markdown_filename)
+            if cfg.generation.write_report_markdown
+            else "",
         )
-    bundle = collect_evidence(cfg, events)
-    payload = generate_report(cfg, bundle, events)
-    events.log(
-        "autoreport.pipeline",
-        "COMPLETED",
-        report_json=str(output_dir / cfg.generation.report_json_filename)
-        if cfg.generation.write_report_json
-        else "",
-        report_md=str(output_dir / cfg.generation.report_markdown_filename)
-        if cfg.generation.write_report_markdown
-        else "",
-    )
-    return payload
+        return payload
+    except Exception as exc:
+        events.log(
+            "autoreport.pipeline",
+            "FAILED",
+            error=str(exc)[:1000],
+        )
+        raise
 
 
 def main(argv: list[str] | None = None) -> int:

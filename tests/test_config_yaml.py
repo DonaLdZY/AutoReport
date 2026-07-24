@@ -24,6 +24,8 @@ def test_commented_default_yaml_loads(monkeypatch) -> None:
     assert cfg.task_name == "demo_task"
     assert cfg.llm.api_key == "env-test-key"
     assert cfg.collection.max_files_per_path == 700
+    assert cfg.llm.minimum_output_tokens == 32768
+    assert cfg.llm.max_tokens == 32768
     assert cfg.generation.report_markdown_filename == "report.md"
     assert cfg.runtime.snapshot_event_limit == 500
     assert cfg.runtime.service_stop_wait_seconds == 15.0

@@ -48,6 +48,7 @@ DEFAULT_IMPORTANT_NAMES = (
     "report.md",
     "run_summary.json",
     "run_status.json",
+    "checkpoint_manifest.json",
     "current_state.json",
     "event_stream.jsonl",
     "journal.json",
@@ -62,6 +63,8 @@ DEFAULT_IMPORTANT_NAMES = (
     "model_artifacts_manifest.md",
     "llm_usage_brief.json",
     "llm_usage_summary.json",
+    "dependency_installations.jsonl",
+    "dependency_installations_summary.json",
     "mlevolve.log",
 )
 
@@ -106,6 +109,17 @@ class ComparisonConfig:
 
 
 @dataclass
+class AnalysisConfig:
+    detail_level: str = "detailed"
+    comparison_candidate_limit: int = 6
+    max_retrieval_rounds: int = 2
+    max_retrieval_requests_per_round: int = 4
+    retrieval_chunk_lines: int = 320
+    initial_source_chars: int = 18000
+    enable_report_audit: bool = True
+
+
+@dataclass
 class GenerationConfig:
     max_report_chars_per_section: int = 60000
     max_prompt_chars: int = 60000
@@ -124,6 +138,7 @@ class GenerationConfig:
     write_report_markdown: bool = True
     report_json_filename: str = "report.json"
     report_markdown_filename: str = "report.md"
+    report_trace_filename: str = "report_trace.json"
 
 
 @dataclass
@@ -133,13 +148,16 @@ class LLMConfig:
     base_url: str = "https://api.deepseek.com"
     api_key: str | None = field(default_factory=lambda: os.environ.get("DEEPSEEK_API_KEY"))
     temperature: float = 0.25
-    max_tokens: int | None = 8192
+    minimum_output_tokens: int = 32768
+    max_tokens: int | None = 32768
     request_timeout_seconds: int = 180
     max_retries: int = 5
     retry_base_sleep_seconds: float = 5.0
     retry_max_sleep_seconds: float = 30.0
     enable_thinking: bool | None = None
     reasoning_effort: str | None = None
+    context_window_tokens: int = 131072
+    context_headroom_ratio: float = 0.18
 
 
 @dataclass
@@ -167,6 +185,7 @@ class AutoReportConfig:
     evidence_paths: list[EvidencePath] = field(default_factory=list)
     collection: CollectionConfig = field(default_factory=CollectionConfig)
     comparison: ComparisonConfig = field(default_factory=ComparisonConfig)
+    analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     generation: GenerationConfig = field(default_factory=GenerationConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
@@ -177,6 +196,7 @@ class AutoReportConfig:
             (
                 isinstance(self.collection, CollectionConfig),
                 isinstance(self.comparison, ComparisonConfig),
+                isinstance(self.analysis, AnalysisConfig),
                 isinstance(self.generation, GenerationConfig),
                 isinstance(self.llm, LLMConfig),
                 isinstance(self.runtime, RuntimeConfig),
@@ -201,6 +221,9 @@ class AutoReportConfig:
                 "comparison": self.comparison
                 if isinstance(self.comparison, dict)
                 else asdict(self.comparison),
+                "analysis": self.analysis
+                if isinstance(self.analysis, dict)
+                else asdict(self.analysis),
                 "generation": self.generation
                 if isinstance(self.generation, dict)
                 else asdict(self.generation),
@@ -214,6 +237,7 @@ class AutoReportConfig:
             normalized.generation.max_prompt_chars = int(legacy_llm["max_prompt_chars"])
         self.collection = normalized.collection
         self.comparison = normalized.comparison
+        self.analysis = normalized.analysis
         self.generation = normalized.generation
         self.llm = normalized.llm
         self.runtime = normalized.runtime
@@ -289,6 +313,7 @@ def config_from_dict(raw: dict[str, Any]) -> AutoReportConfig:
         ),
     )
     comparison_raw = _section(raw, "comparison", ())
+    analysis_raw = _section(raw, "analysis", ())
     generation_raw = _section(raw, "generation", ("max_report_chars_per_section",))
     llm_raw = dict(raw.get("llm") or {})
     runtime_raw = dict(raw.get("runtime") or {})
@@ -318,13 +343,55 @@ def config_from_dict(raw: dict[str, Any]) -> AutoReportConfig:
             for key in ComparisonConfig.__dataclass_fields__
         }
     )
+    analysis_defaults = AnalysisConfig()
+    analysis = AnalysisConfig(
+        detail_level=str(analysis_raw.get("detail_level", analysis_defaults.detail_level)),
+        comparison_candidate_limit=max(
+            2,
+            int(
+                analysis_raw.get(
+                    "comparison_candidate_limit",
+                    analysis_defaults.comparison_candidate_limit,
+                )
+            ),
+        ),
+        max_retrieval_rounds=max(
+            0,
+            int(analysis_raw.get("max_retrieval_rounds", analysis_defaults.max_retrieval_rounds)),
+        ),
+        max_retrieval_requests_per_round=max(
+            1,
+            int(
+                analysis_raw.get(
+                    "max_retrieval_requests_per_round",
+                    analysis_defaults.max_retrieval_requests_per_round,
+                )
+            ),
+        ),
+        retrieval_chunk_lines=max(
+            40,
+            int(analysis_raw.get("retrieval_chunk_lines", analysis_defaults.retrieval_chunk_lines)),
+        ),
+        initial_source_chars=max(
+            2000,
+            int(analysis_raw.get("initial_source_chars", analysis_defaults.initial_source_chars)),
+        ),
+        enable_report_audit=bool(
+            analysis_raw.get("enable_report_audit", analysis_defaults.enable_report_audit)
+        ),
+    )
     generation = GenerationConfig(
         **{
             key: (
                 bool(generation_raw.get(key, getattr(GenerationConfig(), key)))
                 if key in {"write_report_json", "write_report_markdown"}
                 else str(generation_raw.get(key, getattr(GenerationConfig(), key)))
-                if key in {"report_json_filename", "report_markdown_filename"}
+                if key
+                in {
+                    "report_json_filename",
+                    "report_markdown_filename",
+                    "report_trace_filename",
+                }
                 else int(generation_raw.get(key, getattr(GenerationConfig(), key)))
             )
             for key in GenerationConfig.__dataclass_fields__
@@ -337,6 +404,10 @@ def config_from_dict(raw: dict[str, Any]) -> AutoReportConfig:
         api_key=str(llm_raw.get("api_key") or llm_raw.get("apiKey") or "").strip()
         or os.environ.get("DEEPSEEK_API_KEY"),
         temperature=float(llm_raw.get("temperature", 0.25)),
+        minimum_output_tokens=max(
+            0,
+            int(llm_raw.get("minimum_output_tokens", 32768) or 0),
+        ),
         max_tokens=(
             None
             if llm_raw.get("max_tokens") in {None, "", 0, "0"}
@@ -350,6 +421,11 @@ def config_from_dict(raw: dict[str, Any]) -> AutoReportConfig:
         retry_max_sleep_seconds=float(llm_raw.get("retry_max_sleep_seconds", 30.0)),
         enable_thinking=llm_raw.get("enable_thinking"),
         reasoning_effort=llm_raw.get("reasoning_effort"),
+        context_window_tokens=max(8192, int(llm_raw.get("context_window_tokens", 131072))),
+        context_headroom_ratio=min(
+            0.5,
+            max(0.05, float(llm_raw.get("context_headroom_ratio", 0.18))),
+        ),
     )
     runtime = RuntimeConfig(
         write_resolved_config=bool(runtime_raw.get("write_resolved_config", True)),
@@ -374,6 +450,7 @@ def config_from_dict(raw: dict[str, Any]) -> AutoReportConfig:
         evidence_paths=evidence,
         collection=collection,
         comparison=comparison,
+        analysis=analysis,
         generation=generation,
         llm=llm,
         runtime=runtime,
@@ -399,10 +476,10 @@ def load_config(path: str | Path) -> AutoReportConfig:
 
 def config_schema() -> dict[str, Any]:
     return {
-        "schema_version": "autoreport.config.v2",
+        "schema_version": "autoreport.config.v3",
         "format": "YAML preferred; JSON/TOML compatible",
-        "description_zh": "AutoReport 单文件配置，控制证据采集、候选比较、报告生成、模型与运行遥测。",
-        "description_en": "Single-file AutoReport configuration for evidence collection, comparison, generation, LLM, and telemetry.",
+        "description_zh": "AutoReport 单文件配置，控制证据采集、方法分析、候选比较、报告生成、审查与运行遥测。",
+        "description_en": "Single-file AutoReport configuration for collection, method analysis, comparison, report writing, audit, and telemetry.",
         "example": dump_config(
             AutoReportConfig(task_name="demo_task", output_dir="runs/demo_task/report")
         ),
@@ -426,6 +503,7 @@ def dump_config(
         "evidence_paths": [asdict(item) for item in cfg.evidence_paths],
         "collection": asdict(cfg.collection),
         "comparison": asdict(cfg.comparison),
+        "analysis": asdict(cfg.analysis),
         "generation": asdict(cfg.generation),
         "llm": llm,
         "runtime": asdict(cfg.runtime),

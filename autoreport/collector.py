@@ -11,6 +11,14 @@ from .events import ReportEventWriter
 
 
 TEXT_SUFFIXES = {".md", ".txt", ".log", ".json", ".jsonl", ".yaml", ".yml", ".toml", ".py", ".csv"}
+SKIP_DIRECTORY_NAMES = {
+    ".git",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+}
 IMPORTANT_NAMES = {
     "data_description.md",
     "description.md",
@@ -29,6 +37,7 @@ IMPORTANT_NAMES = {
     "report.md",
     "run_summary.json",
     "run_status.json",
+    "checkpoint_manifest.json",
     "current_state.json",
     "event_stream.jsonl",
     "journal.json",
@@ -43,6 +52,8 @@ IMPORTANT_NAMES = {
     "model_artifacts_manifest.md",
     "llm_usage_brief.json",
     "llm_usage_summary.json",
+    "dependency_installations.jsonl",
+    "dependency_installations_summary.json",
     "mlevolve.log",
 }
 
@@ -116,9 +127,13 @@ def _collect_from_path(evidence: EvidencePath, root: Path, cfg: AutoReportConfig
     important_names = {str(name).lower() for name in cfg.collection.important_names}
     text_suffixes = {str(suffix).lower() for suffix in cfg.collection.text_suffixes}
     for path in root.rglob("*"):
-        if len(candidates) >= cfg.max_files_per_path:
-            break
         if not path.is_file():
+            continue
+        try:
+            relative_parts = {part.lower() for part in path.relative_to(root).parts[:-1]}
+        except ValueError:
+            relative_parts = set()
+        if relative_parts & SKIP_DIRECTORY_NAMES:
             continue
         rel_name = path.name.lower()
         if rel_name in important_names or path.suffix.lower() in text_suffixes:
@@ -129,7 +144,9 @@ def _collect_from_path(evidence: EvidencePath, root: Path, cfg: AutoReportConfig
         return important, str(path).lower()
 
     out: list[EvidenceItem] = []
-    for path in sorted(candidates, key=sort_key):
+    # Discover first and prioritize second. Traversal order must not decide which
+    # solution files survive the content-reading budget.
+    for path in sorted(candidates, key=sort_key)[: cfg.max_files_per_path]:
         item = _read_item(evidence, path, root, cfg)
         if item:
             out.append(item)
@@ -278,6 +295,14 @@ def _summarize_known_json(obj: dict[str, Any]) -> dict[str, Any]:
         out["nodes"] = len(obj["nodes"])
     if "best_node_id" in obj:
         out["best_node_id"] = obj.get("best_node_id")
+    if "status" in obj:
+        out["status"] = _short_scalar(obj.get("status"))
+    if "resumable" in obj:
+        out["resumable"] = bool(obj.get("resumable"))
+    if "top_solutions" in obj and isinstance(obj["top_solutions"], list):
+        out["top_solutions"] = len(obj["top_solutions"])
+    if "provisional_top" in obj and isinstance(obj["provisional_top"], list):
+        out["provisional_top"] = len(obj["provisional_top"])
     if "best_metric_text" in obj:
         out["best_metric_text"] = str(obj.get("best_metric_text", ""))[:500]
     return out
@@ -355,17 +380,22 @@ def _derive_solution_evidence(items: list[EvidenceItem], cfg: AutoReportConfig) 
     node_rows = _candidate_nodes_from_items(items, cfg)
     candidate_summary = _summarize_candidate_nodes(node_rows, cfg)
     top_solutions = _top_solution_summaries(items, cfg)
+    checkpoint_candidates = _checkpoint_candidate_summaries(items, cfg)
     artifacts = _delivery_artifact_summary(items, cfg)
     reusable = _reusable_code_summary(best_solution.get("code_excerpt", ""))
 
     return {
         "best_solution": best_solution,
         "top_solutions": top_solutions,
+        "checkpoint_candidates": checkpoint_candidates,
         "candidate_comparison": candidate_summary,
         "delivery_artifacts": artifacts,
         "reusable_code_interface": reusable,
         "available_evidence_files": {
             "journal_files": [item.path for item in by_name.get("journal.json", [])[:5]],
+            "checkpoint_manifests": [
+                item.path for item in by_name.get("checkpoint_manifest.json", [])[:5]
+            ],
             "node_summary_files": [item.path for item in by_name.get("node_summary_compact.json", [])[:5]],
             "metric_files": [item.path for item in by_name.get("metric.txt", [])[:12]],
             "solution_files": [
@@ -384,14 +414,24 @@ def _best_solution_summary(items: list[EvidenceItem], cfg: AutoReportConfig) -> 
         if Path(item.path).name.lower() == "metric.txt" and _path_has_part(item.path, "best_solution")
     ]
     if not metric_items:
-        metric_items = [item for item in items if Path(item.path).name.lower() == "metric.txt"]
+        metric_items = [
+            item
+            for item in items
+            if Path(item.path).name.lower() == "metric.txt"
+            and not _path_has_part(item.path, "checkpoint_candidates")
+        ]
     solution_items = [
         item
         for item in items
         if Path(item.path).name.lower() in {"solution.py", "best_solution.py"} and _path_has_part(item.path, "best_solution")
     ]
     if not solution_items:
-        solution_items = [item for item in items if Path(item.path).name.lower() in {"solution.py", "best_solution.py"}]
+        solution_items = [
+            item
+            for item in items
+            if Path(item.path).name.lower() in {"solution.py", "best_solution.py"}
+            and not _path_has_part(item.path, "checkpoint_candidates")
+        ]
     node_id_items = [
         item
         for item in items
@@ -430,7 +470,12 @@ def _top_solution_summaries(items: list[EvidenceItem], cfg: AutoReportConfig) ->
         for item in items
         if Path(item.path).name.lower() == "metric.txt" and _path_has_part(item.path, "top_solution")
     ]
-    for item in sorted(metric_items, key=lambda x: x.path.lower())[: cfg.comparison.top_solution_limit]:
+    def rank_key(item: EvidenceItem) -> tuple[int, str]:
+        name = Path(item.path).parent.name.lower()
+        digits = "".join(ch for ch in name if ch.isdigit())
+        return (int(digits) if digits else 10**9, item.path.lower())
+
+    for item in sorted(metric_items, key=rank_key)[: cfg.comparison.top_solution_limit]:
         parent = str(Path(item.path).parent)
         sibling = _find_item_by_path(items, str(Path(parent) / "node_id.txt"))
         solution = _find_item_by_path(items, str(Path(parent) / "solution.py"))
@@ -442,6 +487,40 @@ def _top_solution_summaries(items: list[EvidenceItem], cfg: AutoReportConfig) ->
                 "node_id": sibling.text_excerpt.strip()[:120] if sibling else "",
                 "solution_path": solution.path if solution else "",
                 "code_functions": _extract_python_defs(solution.text_excerpt) if solution else [],
+            }
+        )
+    return out
+
+
+def _checkpoint_candidate_summaries(
+    items: list[EvidenceItem],
+    cfg: AutoReportConfig,
+) -> list[dict[str, Any]]:
+    """Describe interrupted searchable candidates without calling them deliverables."""
+    out: list[dict[str, Any]] = []
+    metric_items = [
+        item
+        for item in items
+        if Path(item.path).name.lower() == "metric.txt"
+        and _path_has_part(item.path, "checkpoint_candidates")
+    ]
+    for item in sorted(metric_items, key=lambda x: x.path.lower())[
+        : cfg.comparison.top_solution_limit
+    ]:
+        parent = str(Path(item.path).parent)
+        sibling = _find_item_by_path(items, str(Path(parent) / "node_id.txt"))
+        solution = _find_item_by_path(items, str(Path(parent) / "solution.py"))
+        out.append(
+            {
+                "rank_dir": Path(parent).name,
+                "metric": _parse_metric_text(item.text_excerpt),
+                "metric_path": item.path,
+                "node_id": sibling.text_excerpt.strip()[:120] if sibling else "",
+                "solution_path": solution.path if solution else "",
+                "code_functions": _extract_python_defs(solution.text_excerpt)
+                if solution
+                else [],
+                "status": "searchable_checkpoint_candidate",
             }
         )
     return out
@@ -500,16 +579,23 @@ def _summarize_candidate_nodes(nodes: list[dict[str, Any]], cfg: AutoReportConfi
         return {
             "node_count": 0,
             "successful_metric_nodes": [],
+            "search_candidate_nodes": [],
             "failed_nodes": [],
             "failure_patterns": [],
             "method_signals": {},
         }
 
-    metric_nodes = [n for n in nodes if n.get("metric") not in (None, "", {})]
+    metric_nodes = [n for n in nodes if _finite_number(n.get("metric"))]
     maximize = _first_non_none([n.get("maximize") for n in metric_nodes])
-    successful = [n for n in metric_nodes if not n.get("buggy")]
-    successful = sorted(
-        successful,
+    search_candidates = [
+        n
+        for n in metric_nodes
+        if n.get("search_eligible") is True
+        and n.get("buggy") is False
+        and n.get("valid") is not False
+    ]
+    search_candidates = sorted(
+        search_candidates,
         key=lambda n: _metric_sort_key(n.get("metric"), maximize=maximize),
         reverse=_boolish(maximize),
     )
@@ -521,13 +607,22 @@ def _summarize_candidate_nodes(nodes: list[dict[str, Any]], cfg: AutoReportConfi
         "nodes_with_decision_summary": sum(1 for n in nodes if n.get("has_decision_summary")),
         "valid_nodes": sum(1 for n in nodes if n.get("valid") is True),
         "buggy_nodes": sum(1 for n in nodes if n.get("buggy") is True),
+        "search_eligible_nodes": len(search_candidates),
+        "method_modes": {
+            mode: sum(1 for n in nodes if n.get("method_mode") == mode)
+            for mode in ["prediction", "non_rl_solver", "pure_rl", "hybrid_rl", "unused_rl_scaffold"]
+        },
     }
     return {
         "node_count": len(nodes),
         "maximize": maximize,
         "successful_metric_nodes": [
             _compact_node_for_report(n, cfg)
-            for n in successful[: cfg.comparison.successful_node_limit]
+            for n in search_candidates[: cfg.comparison.successful_node_limit]
+        ],
+        "search_candidate_nodes": [
+            _compact_node_for_report(n, cfg)
+            for n in search_candidates[: cfg.comparison.successful_node_limit]
         ],
         "failed_nodes": [
             _compact_node_for_report(n, cfg)
@@ -536,6 +631,14 @@ def _summarize_candidate_nodes(nodes: list[dict[str, Any]], cfg: AutoReportConfi
         "failure_patterns": failure_patterns,
         "method_signals": method_signals,
     }
+
+
+def _as_text_list(value: Any) -> list[str]:
+    if value in (None, "", []):
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if str(item).strip()]
+    return [str(value)]
 
 
 def _normalize_compact_node(row: dict[str, Any], cfg: AutoReportConfig) -> dict[str, Any]:
@@ -552,8 +655,23 @@ def _normalize_compact_node(row: dict[str, Any], cfg: AutoReportConfig) -> dict[
         "step": row.get("step"),
         "parent": str(row.get("parent") or ""),
         "exec_time": row.get("exec_time"),
-        "buggy": row.get("buggy"),
-        "valid": row.get("valid"),
+        "buggy": row.get("buggy", row.get("is_buggy")),
+        "valid": row.get("valid", row.get("is_valid")),
+        "runtime_ok": row.get("runtime_ok"),
+        "search_eligible": row.get("search_eligible"),
+        "score_recomputed": row.get("score_recomputed"),
+        "contract_valid": row.get("contract_valid"),
+        "artifact_ready": row.get("artifact_ready"),
+        "delivery_ready": row.get("delivery_ready"),
+        "delivery_certified": row.get("delivery_certified"),
+        "certification_source": str(row.get("certification_source") or ""),
+        "certification_notes": _as_text_list(row.get("certification_notes")),
+        "method_mode": str(row.get("method_mode") or "unknown"),
+        "method_family": str(row.get("method_family") or "unknown"),
+        "solution_interface": str(row.get("solution_interface") or ""),
+        "review_verdict": str(row.get("review_verdict") or ""),
+        "review_reason_codes": _as_text_list(row.get("review_reason_codes")),
+        "review_confidence": row.get("review_confidence"),
         "metric": metric_value,
         "maximize": maximize,
         "exc_type": str(row.get("exc_type") or ""),
@@ -583,6 +701,21 @@ def _normalize_journal_node(row: dict[str, Any], cfg: AutoReportConfig) -> dict[
         "exec_time": row.get("exec_time"),
         "buggy": row.get("is_buggy"),
         "valid": row.get("is_valid"),
+        "runtime_ok": row.get("runtime_ok"),
+        "search_eligible": row.get("search_eligible"),
+        "score_recomputed": row.get("score_recomputed"),
+        "contract_valid": row.get("contract_valid"),
+        "artifact_ready": row.get("artifact_ready"),
+        "delivery_ready": row.get("delivery_ready"),
+        "delivery_certified": row.get("delivery_certified"),
+        "certification_source": str(row.get("certification_source") or ""),
+        "certification_notes": _as_text_list(row.get("certification_notes")),
+        "method_mode": str(row.get("method_mode") or "unknown"),
+        "method_family": str(row.get("method_family") or "unknown"),
+        "solution_interface": str(row.get("solution_interface") or ""),
+        "review_verdict": str(row.get("review_verdict") or ""),
+        "review_reason_codes": _as_text_list(row.get("review_reason_codes")),
+        "review_confidence": row.get("review_confidence"),
         "metric": metric.get("value"),
         "maximize": metric.get("maximize"),
         "exc_type": str(row.get("exc_type") or ""),
@@ -610,6 +743,19 @@ def _compact_node_for_report(node: dict[str, Any], cfg: AutoReportConfig) -> dic
         "maximize": node.get("maximize"),
         "valid": node.get("valid"),
         "buggy": node.get("buggy"),
+        "runtime_ok": node.get("runtime_ok"),
+        "search_eligible": node.get("search_eligible"),
+        "score_recomputed": node.get("score_recomputed"),
+        "contract_valid": node.get("contract_valid"),
+        "artifact_ready": node.get("artifact_ready"),
+        "method_mode": node.get("method_mode"),
+        "method_family": node.get("method_family"),
+        "solution_interface": node.get("solution_interface"),
+        "review": {
+            "verdict": node.get("review_verdict"),
+            "reason_codes": node.get("review_reason_codes") or [],
+            "confidence": node.get("review_confidence"),
+        },
         "exec_time": node.get("exec_time"),
         "method_flags": {
             "greedy": bool(node.get("has_greedy")),
@@ -691,6 +837,12 @@ def _parse_metric_text(text: str) -> dict[str, Any]:
             out["metric"] = _maybe_number(value)
         elif norm == "maximize":
             out["maximize"] = value.lower() in {"true", "1", "yes"}
+        elif norm in {
+            "search_eligible",
+            "delivery_ready",
+            "delivery_certified",
+        }:
+            out[norm] = value.lower() in {"true", "1", "yes"}
         elif norm == "branch_id":
             out["branch_id"] = value
         elif norm == "stage":
@@ -712,6 +864,14 @@ def _maybe_number(value: Any) -> Any:
         return int(text)
     except Exception:
         return value
+
+
+def _finite_number(value: Any) -> bool:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return False
+    return numeric == numeric and numeric not in {float("inf"), float("-inf")}
 
 
 def _metric_sort_key(value: Any, *, maximize: Any) -> tuple[int, float]:
