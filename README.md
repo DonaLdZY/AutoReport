@@ -53,8 +53,8 @@ cd AutoReport
 ### 2. 创建 Python 3.12 环境
 
 ```bash
-conda create -n autoreport python=3.12 pip -y
-conda activate autoreport
+conda create -n autodecision python=3.12 pip -y
+conda activate autodecision
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
@@ -263,7 +263,7 @@ Windows 可把配置路径改成 `Path.home() / ".autoreport/config.yaml"`。`ru
 在 AutoReport 仓库根目录启动：
 
 ```bash
-conda activate autoreport
+conda activate autodecision
 python -m uvicorn service_api:app --host 127.0.0.1 --port 18104
 ```
 
