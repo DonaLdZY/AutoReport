@@ -1,206 +1,223 @@
 # AutoReport
 
-AutoReport 是 AutoDecision 的最终方案报告生成器。它读取 AutoRealize 的问题定义和 MLEvolve 已接受的搜索节点，按需补读候选代码，先形成结构化方法分析，再生成并检查面向使用者的 Markdown 报告。
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
 
-AutoReport 的重点不是解释 AutoML 系统如何搜索，而是回答：最终方案做了什么、为什么可信、比其他候选好在哪里、有哪些限制，以及用户如何直接复用代码和产物。
+AutoReport 是 AutoDecision 的**最终方案研究与交付报告生成器**。它读取 AutoRealize 生成的 Kaggle 风格任务包，以及 MLEvolve 搜索过程中已经通过 Result Review 的候选方案、代码、指标和模型/求解器产物，生成一份可供使用者审阅和复用的 Markdown 报告。
 
-## 报告内容
-
-标准报告会尽量覆盖：
-
-1. 摘要与交付结论。
-2. 问题定义与验收口径。
-3. 最终方案的数据处理、模型、算法或求解器流程。
-4. 输入格式、运行命令、`predict()` 或 solver 接口和 artifact 复用。
-5. 指标、评分组件、验证结果和交付物。
-6. 与 Top-K 或其他有效候选的方法和效果对比。
-7. 已知风险、适用边界和后续改进。
-8. 交付检查清单。
-
-没有证据支持的内容应标记为“现有证据未显示”，不能根据常识补写成既定事实。
-
-## 工作流程
-
-```text
-AutoRealize 产物 + MLEvolve 日志/工作区 + 其他证据
-                         |
-                         v
-                文件发现与来源识别
-                         |
-                         v
-             有效节点与 Top-K 提取
-                         |
-                         v
-          代码索引、头尾上下文与按需补读
-                         |
-                         v
-             LLM 方法分析与压缩记忆
-                         |
-                         v
-                LLM 撰写并检查报告
-                         |
-                         v
-     report.md + report.json + 内部 trace + 运行状态
+```mermaid
+flowchart LR
+    A["原始数据 + 自然语言需求"] --> B["AutoRealize"]
+    B --> C["Kaggle 风格任务包"]
+    C --> D["MLEvolve"]
+    D --> E["搜索树、有效候选、最佳代码与 artifact"]
+    C --> F["AutoReport"]
+    E --> F
+    F --> G["方案交付报告"]
 ```
 
-## 主要功能
+## 报告结构
 
-- 同时读取多个证据根目录，并记录来源类型。
-- 自动识别 AutoRealize、MLEvolve/AutoML 和通用证据。
-- 提取任务说明、数据认知、评估合同、输出合同和样例提交。
-- 提取最佳方案、Top-K 代码、metric、节点 insight 和模型 artifact。
-- 从 journal 或 compact summary 中筛选 `is_buggy=false`、`search_eligible=true` 且 `is_valid` 不为 false 的可比较节点。
-- 收集 `submission.csv`、`assignments.csv`、`metrics.json` 等交付文件。
-- 长代码保留结构、头尾和可取回的行号索引，分析模型可按需补读中间源码。
-- 跨阶段只传递结构化问题理解、方法卡和候选比较，不重复发送全部原始代码。
-- 按技术、管理或交付读者调整表达，并支持中文或英文报告。
-- 输出 Markdown、结构化 JSON、resolved config、事件流和当前状态。
-- 提供 FastAPI 服务供 AutoDecision Gateway 编排。
+默认报告要求包含以下章节：
 
-## 候选语义
+1. 摘要与最终方案；
+2. 问题解析与重要约束；
+3. 问题建模；
+4. 最佳方法详解；
+5. 候选方法与效果对比；
+6. 最佳方法的提升来源；
+7. 直接使用已训练模型、策略或求解器；
+8. 重新训练或重新求解；
+9. 接入其他系统；
+10. 限制与注意事项。
 
-AutoReport 不重新裁决节点，只比较 MLEvolve Result Review 已接受的节点。核心条件是 `is_buggy=false`、`search_eligible=true`、`is_valid` 不为 false且 metric 有限。`delivery_ready` 和 `delivery_certified` 仅为 MLEvolve 的兼容字段，不参与报告候选筛选。
+预测和强化学习任务优先说明怎样加载已有模型或策略；静态优化/决策任务如果没有训练 artifact，则优先说明怎样直接调用求解器。代码中不存在的 `predict()`、模型文件或命令不能由报告补造。
 
 ## 环境要求
 
-- Conda、Miniconda 或 Miniforge
-- Python 3.11 或 3.12，推荐 Python 3.12
-- 可访问 OpenAI-compatible LLM API
-- 已完成或部分完成的 AutoRealize / MLEvolve 证据目录
-- 对证据目录和输出目录的读写权限
+- Conda、Miniconda 或 Miniforge；
+- **Python 3.12**；
+- 可访问的 OpenAI-compatible Chat Completions API；
+- 已完成或部分完成的 AutoRealize / MLEvolve 输出目录；
+- 对证据目录的读取权限和报告目录的写入权限。
 
-AutoReport 当前要求 LLM 可用。缺少模型名、API 地址或 API Key 时会失败，不会用固定模板伪造一份报告。
+## 使用 Conda 安装
 
-## Conda 环境安装
-
-### 在 AutoDecision 主仓库中使用
-
-```bash
-cd AutoDecision
-conda env create -f environment.yml
-conda activate automl
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-
-### 独立安装 AutoReport
+### 1. 克隆仓库
 
 ```bash
 git clone https://github.com/DonaLdZY/AutoReport.git
 cd AutoReport
+```
+
+### 2. 创建 Python 3.12 环境
+
+```bash
 conda create -n autoreport python=3.12 pip -y
 conda activate autoreport
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-验证当前解释器：
+验证解释器和模块位置：
 
 ```bash
-python -c "import sys; print(sys.executable); print(sys.version)"
+python --version
+python -c "import autoreport; print(autoreport.__version__); print(autoreport.__file__)"
+```
+
+第一条命令应输出 `Python 3.12.x`，模块路径应指向当前仓库中的 `autoreport/__init__.py`。
+
+开发和测试依赖：
+
+```bash
+python -m pip install -r requirements-dev.txt
 ```
 
 ## 配置
 
-默认配置文件是 [`config/config.yaml`](config/config.yaml)，包含完整中英文注释。CLI 未传 `--config` 时自动读取该文件，也可以指定其他位置的 YAML。
-
-主要配置区：
-
-| 配置 | 作用 |
-| --- | --- |
-| `task_name` | 任务标识 |
-| `output_dir` | 报告和状态文件输出目录 |
-| `report_title` | 人类可读标题 |
-| `audience` | `technical`、`executive` 或 `delivery` |
-| `language` | `zh-CN` 或 `en-US` |
-| `evidence_paths` | 一个或多个证据目录、类型和必需性 |
-| `collection` | 扫描上限、文件类型、日志和代码采集预算 |
-| `comparison` | Top-K、成功/失败节点和交付物数量预算 |
-| `analysis` | 报告详细程度、候选数量、代码补读轮次和终稿检查 |
-| `generation` | prompt 字符预算、输出格式和文件名 |
-| `llm` | 模型、API、thinking、输出 token 和重试 |
-| `runtime` | resolved config、事件流、状态和服务日志 |
-
-最小配置示例：
-
-```yaml
-task_name: "demo_task"
-output_dir: "../../runs/demo_task/report"
-report_title: "demo_task 方案交付报告"
-audience: "delivery"
-language: "zh-CN"
-
-evidence_paths:
-  - label: "autorealize"
-    path: "../../runs/demo_task/autorealize"
-    kind: "autorealize"
-    required: true
-  - label: "automl"
-    path: "../../runs/demo_task/automl"
-    kind: "mlevolve"
-    required: false
-
-llm:
-  enabled: true
-  model: "deepseek-v4-pro"
-  base_url: "https://api.deepseek.com"
-  api_key: null
-  max_tokens: 8192
-  enable_thinking: null
-  reasoning_effort: null
-  context_window_tokens: 131072
-
-analysis:
-  detail_level: "detailed"
-  comparison_candidate_limit: 6
-  max_retrieval_rounds: 2
-  enable_report_audit: true
-```
-
-`llm.api_key` 非空时优先使用配置值；为空时读取 `DEEPSEEK_API_KEY`。不要提交包含真实 API Key 的 YAML。
+默认配置是 [`config/config.yaml`](config/config.yaml)。建议复制到仓库外作为私有运行配置，避免误提交 Key、用户名或本地绝对路径。
 
 Linux / macOS：
 
 ```bash
+mkdir -p "$HOME/.config/autoreport"
+cp config/config.yaml "$HOME/.config/autoreport/config.yaml"
 export DEEPSEEK_API_KEY="your_api_key"
 ```
 
 Windows PowerShell：
 
 ```powershell
+New-Item -ItemType Directory -Force "$HOME\.autoreport" | Out-Null
+Copy-Item ".\config\config.yaml" "$HOME\.autoreport\config.yaml"
 $env:DEEPSEEK_API_KEY = "your_api_key"
 ```
 
-### 证据类型
+`llm.api_key` 非空时配置文件优先；为 `null` 时读取 `DEEPSEEK_API_KEY`。即使使用其他 OpenAI-compatible provider，当前版本读取的文本模型环境变量名仍是 `DEEPSEEK_API_KEY`。
 
-`evidence_paths[].kind` 支持：
+### 最小配置
 
-- `autorealize`：任务、数据、合同和上下文产物。
-- `mlevolve` 或 `automl`：搜索日志、工作区、候选和最佳方案。
-- `generic`：调用方提供的普通证据目录。
-- `auto`：根据文件结构自动判断。
+```yaml
+task_name: "demo_task"
+output_dir: "D:/runs/demo_task/report"
+report_title: "demo_task 方案交付报告"
+audience: "delivery"
+language: "zh-CN"
 
-`required: true` 的路径缺失时任务失败；可选路径缺失时记录 warning 并继续。
+evidence_paths:
+  - label: "autorealize"
+    path: "D:/runs/demo_task/autorealize"
+    kind: "autorealize"
+    required: true
+  - label: "mlevolve"
+    path: "D:/runs/demo_task/automl"
+    kind: "mlevolve"
+    required: true
 
-## CLI 运行
+analysis:
+  detail_level: "detailed"
+  comparison_candidate_limit: 6
+  max_retrieval_rounds: 2
+  enable_report_audit: true
 
-使用默认或指定 YAML：
-
-```bash
-python -m autoreport.cli --config config/config.yaml
+llm:
+  enabled: true
+  model: "deepseek-v4-pro"  # 改成你的账号实际可用模型
+  base_url: "https://api.deepseek.com"
+  api_key: null
+  minimum_output_tokens: 32768
+  max_tokens: 32768
+  enable_thinking: null
+  reasoning_effort: null
+  context_window_tokens: 131072
+  context_headroom_ratio: 0.18
 ```
 
-也可以从命令行覆盖关键参数：
+相对证据路径按**启动命令的当前工作目录**解析，不按配置文件所在目录解析。跨机器使用时建议写绝对路径。
+
+### 证据入口
+
+`evidence_paths` 可配置多个根目录：
+
+| `kind`                  | 用途                                                          |
+| ------------------------- | ------------------------------------------------------------- |
+| `autorealize`           | 问题定义、数据认知、读取合同、评估合同、输出合同和样例提交    |
+| `mlevolve` / `automl` | 搜索日志、节点摘要、最佳/Top-K 代码、metric 和模型/求解器产物 |
+| `generic`               | 调用方提供的其他 Markdown、JSON、CSV、代码或日志              |
+| `auto`                  | 主要按文件名和目录结构为每个证据项分类                        |
+
+`required: true` 的路径不存在时直接失败；可选路径缺失时写 warning 并继续。证据根既可以是目录，也可以是单个文件。
+
+### 重要配置项
+
+| 配置                                          | 影响                                                               |
+| --------------------------------------------- | ------------------------------------------------------------------ |
+| `audience`                                  | 预期为`technical`、`executive` 或 `delivery`，影响报告侧重点 |
+| `language`                                  | `zh-CN` 强制所有自然语言字段和终稿使用中文；`en-US` 使用英文   |
+| `collection.max_files_per_path`             | 每个证据根在完整发现、排序后实际读取的最大文件数                   |
+| `collection.max_text_chars_per_file`        | 单文件首次采集字符上限                                             |
+| `collection.include_raw_logs`               | 是否采集日志尾部；大型搜索目录关闭后更快                           |
+| `collection.include_code_excerpt`           | 是否首次采集 Python 代码；方法报告通常应保持开启                   |
+| `comparison.top_solution_limit`             | 采集的 Top-K 方案目录数量                                          |
+| `comparison.successful_node_limit`          | 进入结构化摘要的有效节点数量                                       |
+| `analysis.comparison_candidate_limit`       | LLM 最终详细研究的方法卡数量，最小值会被规范为`2`                |
+| `analysis.max_retrieval_rounds`             | 方法分析最多追加的源码补读轮次；`0` 表示只看初始头尾             |
+| `analysis.max_retrieval_requests_per_round` | 每轮允许补读的源码片段数                                           |
+| `analysis.retrieval_chunk_lines`            | 每次补读最大行数，配置小于`40` 时按 `40` 处理                  |
+| `analysis.enable_report_audit`              | 是否额外调用一次 LLM 审查并修订终稿                                |
+| `generation.max_prompt_chars`               | 初始证据简报字符预算；实际请求还受 token headroom 约束             |
+| `llm.minimum_output_tokens`                 | 业务调用的输出上限下限；仅降低`max_tokens` 不会低于此值          |
+| `llm.context_window_tokens`                 | 用于本地上下文预算计算，必须与你实际模型窗口相符                   |
+| `llm.context_headroom_ratio`                | 额外预留的上下文比例，加载时限制在`0.05` 至 `0.5`              |
+
+默认 `max_retrieval_rounds: 2` 时，通常最多包含 3 次分析调用、1 次写作调用和 1 次审查调用；分析可提前结束，结构化 JSON 格式失败则可能重试。减少候选数、补读轮次或关闭终稿审查可以降低时间和费用。
+
+### DeepSeek 与其他 Provider
+
+模型名以 `deepseek` 开头且地址为官方根地址时，客户端会把地址归一化为 `https://api.deepseek.com/beta`。`enable_thinking` 和 `reasoning_effort` 只有非空时才发送。
+
+使用其他 OpenAI-compatible 服务时替换模型和地址即可：
+
+```yaml
+llm:
+  enabled: true
+  model: "your-model"
+  base_url: "https://your-provider.example/v1"
+  api_key: null
+  enable_thinking: null
+  reasoning_effort: null
+```
+
+兼容服务必须提供 `POST <base_url>/chat/completions`。对于不接受 DeepSeek thinking 字段的服务，请保持两项为 `null`。
+
+## CLI 使用
+
+### 使用配置文件
+
+```bash
+python -m autoreport.cli --config "$HOME/.config/autoreport/config.yaml"
+```
+
+Windows PowerShell：
+
+```powershell
+python -m autoreport.cli --config "$HOME\.autoreport\config.yaml"
+```
+
+### 直接覆盖关键参数
+
+Linux / macOS：
 
 ```bash
 python -m autoreport.cli \
-  --task-name demo_task \
-  --output-dir ../../runs/demo_task/report \
+  --task-name "demo_task" \
+  --output-dir "/absolute/path/to/runs/demo_task/report" \
   --report-title "demo_task 方案交付报告" \
-  --audience delivery \
-  --language zh-CN \
-  --evidence autorealize=../../runs/demo_task/autorealize::autorealize \
-  --evidence automl=../../runs/demo_task/automl::mlevolve
+  --audience "delivery" \
+  --language "zh-CN" \
+  --evidence "autorealize=/absolute/path/to/autorealize::autorealize" \
+  --evidence "mlevolve=/absolute/path/to/automl::mlevolve"
 ```
 
 Windows PowerShell：
@@ -208,65 +225,122 @@ Windows PowerShell：
 ```powershell
 python -m autoreport.cli `
   --task-name "demo_task" `
-  --output-dir "..\..\runs\demo_task\report" `
+  --output-dir "D:\runs\demo_task\report" `
   --report-title "demo_task 方案交付报告" `
   --audience "delivery" `
   --language "zh-CN" `
-  --evidence "autorealize=..\..\runs\demo_task\autorealize::autorealize" `
-  --evidence "automl=..\..\runs\demo_task\automl::mlevolve"
+  --evidence "autorealize=D:\runs\demo_task\autorealize::autorealize" `
+  --evidence "mlevolve=D:\runs\demo_task\automl::mlevolve"
 ```
 
-`--evidence` 可以重复使用，格式为 `label=path` 或 `label=path::kind`。模型参数可以通过 `--llm-model`、`--llm-base-url` 和 `--llm-api-key` 覆盖；API Key 更推荐使用 YAML 临时配置或环境变量，避免进入 shell 历史。
+`--evidence` 可重复，格式为 `label=path` 或 `label=path::kind`。只要命令行传入任何 `--evidence`，它们会整体替换配置文件中的 `evidence_paths`。模型也可用 `--llm-model`、`--llm-base-url` 和 `--llm-api-key` 覆盖；Key 更适合放在环境变量中，避免进入 shell 历史。
 
-## 服务模式
+查看实际参数：
 
 ```bash
+python -m autoreport.cli --help
+```
+
+## Python API
+
+```python
+from pathlib import Path
+
+from autoreport.cli import run
+from autoreport.config import load_config
+
+config = load_config(Path.home() / ".config/autoreport/config.yaml")
+payload = run(config)
+
+print(payload["summary"])
+print(Path(config.output_dir) / config.generation.report_markdown_filename)
+```
+
+Windows 可把配置路径改成 `Path.home() / ".autoreport/config.yaml"`。`run()` 返回与 `report.json` 同结构的字典；异常不会被吞掉，调用方应自行捕获并记录。
+
+## FastAPI 服务
+
+在 AutoReport 仓库根目录启动：
+
+```bash
+conda activate autoreport
 python -m uvicorn service_api:app --host 127.0.0.1 --port 18104
 ```
 
-常用接口：
+交互式 OpenAPI 页面：`http://127.0.0.1:18104/docs`。
 
-- `GET /health`
-- `GET /usage`
-- `GET /config/schema`
-- `POST /jobs/start`
-- `GET /jobs/{job_id}`
-- `POST /jobs/stop`
-- `POST /snapshot`
+### 使用现有配置启动任务
 
-访问 `http://127.0.0.1:18104/docs` 查看 OpenAPI 文档。`POST /jobs/start` 可以传入 `config_path`，也可以直接接收前端生成的配置对象。
+先在启动服务的终端设置 `DEEPSEEK_API_KEY`，然后调用：
 
-## 读取的关键证据
+```bash
+curl -X POST "http://127.0.0.1:18104/jobs/start" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "task_id": "demo_task",
+    "task_name": "demo_task",
+    "output_dir": "/absolute/path/to/runs/demo_task/report",
+    "config_path": "/absolute/path/to/autoreport-config.yaml",
+    "python_executable": "python",
+    "working_dir": "/absolute/path/to/AutoReport"
+  }'
+```
 
-### AutoRealize
+### 使用内联配置启动任务
 
-- `description.md`
-- `sample_submission.csv`
-- `realize_report/data_description.md`
-- `realize_report/automl_context.md`
-- `realize_report/evaluation_contract_report.json`
-- `realize_report/data_cognition_report.json`
-- `realize_report/question_investigation_report.json`
+```bash
+curl -X POST "http://127.0.0.1:18104/jobs/start" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "task_id": "demo_task",
+    "task_name": "demo_task",
+    "output_dir": "/absolute/path/to/runs/demo_task/report",
+    "evidence_paths": [
+      {"label":"autorealize","path":"/absolute/path/to/autorealize","kind":"autorealize","required":true},
+      {"label":"mlevolve","path":"/absolute/path/to/automl","kind":"mlevolve","required":true}
+    ],
+    "config": {
+      "report_title": "demo_task 方案交付报告",
+      "audience": "delivery",
+      "language": "zh-CN",
+      "analysis": {"detail_level":"detailed","comparison_candidate_limit":6,"max_retrieval_rounds":2,"enable_report_audit":true},
+      "llm": {"enabled":true,"model":"deepseek-v4-pro","base_url":"https://api.deepseek.com","api_key":null}
+    },
+    "python_executable": "python",
+    "working_dir": "/absolute/path/to/AutoReport"
+  }'
+```
 
-### MLEvolve
+服务生成的 `_service_config.yaml` 和 `resolved_config.yaml` 会清除 API Key。请求中的 Key 如存在会转发到子进程环境，但生产环境更推荐在服务进程中预先设置环境变量。
 
-- `best_solution/solution.py`
-- `best_solution/metric.txt`
-- `best_solution/node_id.txt`
-- 模型或求解器 artifact manifest
-- `top_solution/top*/solution.py` 和 `metric.txt`
-- `journal.json`、`filtered_journal.json`、`node_summary_compact.json`
-- `run_status.json`、`llm_usage_brief.json`
+### 查询、停止和读取快照
 
-### 交付物
+```bash
+# 查询任务
+curl "http://127.0.0.1:18104/jobs/<job_id>"
 
-- `submission.csv`
-- `assignments.csv`
-- `unassigned_orders.csv`
-- `metrics.json`
-- 其他由最佳方案生成的 CSV、JSON、模型或说明文件
+# 停止任务
+curl -X POST "http://127.0.0.1:18104/jobs/stop" \
+  -H "Content-Type: application/json" \
+  -d '{"job_id":"<job_id>"}'
 
-具体文件数量和字符上限由 `collection`、`comparison` 和 `generation` 控制。
+# 读取前端所需的状态、事件、报告和服务日志
+curl -X POST "http://127.0.0.1:18104/snapshot" \
+  -H "Content-Type: application/json" \
+  -d '{"output_dir":"/absolute/path/to/runs/demo_task/report"}'
+```
+
+| 方法     | 路径               | 用途                                         |
+| -------- | ------------------ | -------------------------------------------- |
+| `GET`  | `/health`        | 健康检查                                     |
+| `GET`  | `/usage`         | 返回 CLI 示例和配置 schema                   |
+| `GET`  | `/config/schema` | 返回机器可读配置说明及示例                   |
+| `POST` | `/jobs/start`    | 验证配置并启动 AutoReport 子进程             |
+| `GET`  | `/jobs/{job_id}` | 查询状态、退出码和 stdout/stderr 尾部        |
+| `POST` | `/jobs/stop`     | 终止任务，等待超时后强制结束                 |
+| `POST` | `/snapshot`      | 读取当前状态、近期事件、报告、配置和服务日志 |
+
+任务列表保存在服务进程内存中；服务重启后旧 `job_id` 不再可查，但已落盘报告仍可通过 `/snapshot` 读取。默认 CORS 只允许本机 `5173` 前端，可用逗号分隔的 `AUTOREPORT_ALLOWED_ORIGINS` 调整。
 
 ## 输出目录
 
@@ -277,72 +351,19 @@ python -m uvicorn service_api:app --host 127.0.0.1 --port 18104
 |-- report_trace.json
 |-- resolved_config.yaml
 |-- event_stream.jsonl
-`-- current_state.json
+|-- current_state.json
+|-- _service_config.yaml       # 通过服务内联配置启动时存在
+|-- _service_stdout.log        # 服务捕获到输出时存在
+`-- _service_stderr.log        # 服务捕获到错误时存在
 ```
 
-- `report.md`：完整人类可读报告。
-- `report.json`：结构化报告、章节和运行摘要。
-- `report_trace.json`：内部方法分析、补读记录和终稿检查结果；不在用户报告中展示。
-- `resolved_config.yaml`：实际运行配置，API Key 会被清除。
-- `event_stream.jsonl`：采集与生成阶段事件。
+- `report.md`：最终人类可读报告；
+- `report.json`：报告元数据、章节、完整 Markdown 和运行摘要；
+- `report_trace.json`：内部 source catalog、补读记录、结构化方法分析、审查结果和逐阶段 LLM usage；
+- `resolved_config.yaml`：实际生效配置，API Key 被清除；
+- `event_stream.jsonl`：追加式运行事件；
 - `current_state.json`：供服务和前端轮询的状态快照。
 
-## Prompt 与成本控制
+`report_trace.json` 可能包含代码路径、方法分析和证据摘要，不应直接作为对外报告发布。
 
-AutoReport 不会把整个运行目录拼接成一个超长 prompt：
-
-1. 先完整发现相关文件，再按重要性应用内容读取预算，避免遍历顺序漏掉最佳方案。
-2. 长代码提供 AST 函数/类索引和头尾片段；模型可用 `source_id + 行号` 补读中间内容。
-3. 分析轮次将上一轮完整原文压缩为结构化方法卡，原始文件仍可取回。
-4. 写作和审查阶段复用结构化分析，不重复携带全部代码。
-5. 固定语言版 system prompt 始终位于消息前缀，动态材料和最新阶段指令位于后部，便于 provider 前缀缓存命中。
-6. 接近上下文窗口时保留任务摘要、方法卡、源索引和最新补读内容，并预留输出 headroom。
-
-降低候选数量、补读轮次或报告详细程度可以减少输入费用；终稿检查会增加一次模型调用。
-
-## 测试
-
-```bash
-conda activate autoreport
-python -m pip install -r requirements-dev.txt
-python -m pytest -q
-```
-
-在 AutoDecision 根环境中：
-
-```bash
-conda activate automl
-python -m pytest core/AutoReport/tests -q
-```
-
-默认测试使用 mock，不调用真实 LLM。
-
-## 常见问题
-
-### 提示缺少 API Key
-
-确认 `llm.api_key` 非空，或在启动 CLI/服务的同一 Conda 环境中设置 `DEEPSEEK_API_KEY`。AutoReport 不提供无 LLM 的固定模板 fallback。
-
-### 报告没有比较其他方案
-
-检查 MLEvolve 证据目录是否包含 `journal.json`、`top_solution/` 或 compact summary，并确认候选预算不为零。没有真实候选证据时，报告不会编造对比。
-
-### 报告没有写清如何复用
-
-检查最佳方案目录是否包含 `solution.py`、artifact、运行说明和实际输出。AutoReport 可以总结已有证据，但不能推断一个从未实现的 `predict()` 或 solver 接口。
-
-### 扫描大型运行目录很慢
-
-调整 `collection.max_files_per_path`、`include_raw_logs`、文本后缀和重要文件名列表。通常不需要读取每个节点的完整 stdout 和全部工作区副本。
-
-### 报告纳入了无效节点
-
-检查 compact summary 是否提供当前 `is_buggy`、`search_eligible` 和 `is_valid` 字段。AutoReport 不再使用 `delivery_ready` 兼容字段或缺字段时的乐观 fallback。
-
-## 安全、边界与许可证
-
-- 服务模式下 API Key 通过子进程环境变量或任务配置传递，resolved config 不应保存真实密钥。
-- AutoReport API 默认只应由本机 Gateway 调用，不应直接暴露公网。
-- AutoReport 基于现有证据组织交付文档，不替代独立模型审计、统计检验、安全评估或领域验收。
-- 最终报告中的关键数字应能回溯到 metric、代码输出或结构化合同。
-- 仓库加入明确许可证前，不应视为已经授权自由使用、修改或再分发。
+本项目采用 [Apache License 2.0](LICENSE)。你可以在许可证条款下使用、修改和分发本项目；再分发时需保留许可证及相关版权/NOTICE 声明，并遵守 Apache-2.0 的专利和商标条款。
