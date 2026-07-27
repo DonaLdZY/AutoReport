@@ -3,13 +3,13 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
 
-AutoReport 是 AutoDecision 的**最终方案研究与交付报告生成器**。它读取 AutoRealize 生成的 Kaggle 风格任务包，以及 MLEvolve 搜索过程中已经通过 Result Review 的候选方案、代码、指标和模型/求解器产物，生成一份可供使用者审阅和复用的 Markdown 报告。
+AutoReport 是 AutoDecision 的**最终方案研究与交付报告生成器**。它读取 AutoRealize 生成的 Kaggle 风格任务包，以及 AlgoEvolve 搜索过程中已经通过 Result Review 的候选方案、代码、指标和模型/求解器产物，生成一份可供使用者审阅和复用的 Markdown 报告。
 
 ```mermaid
 flowchart LR
     A["原始数据 + 自然语言需求"] --> B["AutoRealize"]
     B --> C["Kaggle 风格任务包"]
-    C --> D["MLEvolve"]
+    C --> D["AlgoEvolve"]
     D --> E["搜索树、有效候选、最佳代码与 artifact"]
     C --> F["AutoReport"]
     E --> F
