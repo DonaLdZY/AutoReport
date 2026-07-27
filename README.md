@@ -366,4 +366,6 @@ curl -X POST "http://127.0.0.1:18104/snapshot" \
 
 `report_trace.json` 可能包含代码路径、方法分析和证据摘要，不应直接作为对外报告发布。
 
+Copyright 2026 Bydecision.
+
 本项目采用 [Apache License 2.0](LICENSE)。你可以在许可证条款下使用、修改和分发本项目；再分发时需保留许可证及相关版权/NOTICE 声明，并遵守 Apache-2.0 的专利和商标条款。
